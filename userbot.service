@@ -1,0 +1,17 @@
+# Пользовательский сервис systemd. Поправь путь, если клонировал не в ~/tg-llm-userbot:
+#   cp userbot.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now userbot
+[Unit]
+Description=Telegram LLM userbot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/tg-llm-userbot
+ExecStart=%h/tg-llm-userbot/.venv/bin/python userbot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

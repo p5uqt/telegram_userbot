@@ -1,0 +1,16 @@
+# секреты и личное — НИКОГДА не коммитить
+.env
+state/
+*.session
+*.session-journal
+persona.md
+
+# окружение и мусор
+.venv/
+__pycache__/
+*.pyc
+sandbox/
+
+# личные инструменты, не часть проекта
+coder_bot.py
+AGENT_LOGIN.md

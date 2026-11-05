@@ -1,0 +1,4 @@
+telethon>=1.36
+pillow>=10.0       # фото для vision-моделей (LLM_VISION=1)
+qrcode>=7.4        # только для qr_login.py
+faster-whisper>=1.1
