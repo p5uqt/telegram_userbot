@@ -481,6 +481,11 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
         parts.append("Он задал вопрос: " + " / ".join(f"«{q}»" for q in qs[-3:])
                      + ". Сначала прямо ответь на него (если спрашивает про тебя - ответь про себя), "
                      "не уходи от ответа встречным вопросом.")
+    if _HOWRU_ASK.search(text) and told_howru(text):
+        parts.append("Он уже рассказал, как у него дела, и спросил, как у тебя. Ответь очень коротко - "
+                     "«тоже норм», «тоже всё ок», «да нормально» - без «спасибо» и без рассказов о себе. "
+                     "Встречное «а у тебя как?» не задавай, он только что ответил. Если хочешь "
+                     "продолжить - просто спроси «а чем занимаешься?», без «когда не работаешь/учишься».")
     if len(pending) > 1 or len(qs) > 1:
         parts.append("Собеседник написал несколько вещей подряд - отреагируй на всё важное "
                      "(коротко на каждое), а не только на последнее.")
@@ -522,6 +527,13 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
         parts.append("Он зовёт встретиться/созвониться. Не соглашайся и ничего не назначай: мягко "
                      "уйди от ответа («пока не знаю, посмотрим», «щас завал, потом как-нибудь»), "
                      "не спрашивай, где он живёт.")
+    if re.search(r"сколько|почём|почем|цена|стоит|price|how much|cost", text, re.I) \
+            and re.search(r"фот|видео|photo|video|pic|vid|ролик", text, re.I):
+        parts.append("He's asking the price for photos/videos. One photo — 2 gram, "
+                     "a one-minute video — 12 gram. The channel is 10 gram/month. "
+                     "Answer short, one or two sentences, like a normal chat message. "
+                     "Always write the currency in Latin letters: 'gram' — never «грам» in Cyrillic, "
+                     "even if you answer in Russian.")
     if re.search(r"ссылк|дай ссыл|скидывай ссыл|канал.*ссыл|ссылк.*канал|link|send.*link|give.*link|channel link", text, re.I):
         parts.append("He wants your channel link. Before giving it, ask him to send 10 GRAM to your wallet. "
                      "Write in English. "
@@ -530,7 +542,8 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
                      "Just say: 'send 10 GRAM to my wallet and i'll send the link' or give the address. "
                      "Wallet: UQDxffgSOB_ir8GnoCJ0phElX5P-3ZOTpmSHNIllnoIfLl8d. "
                      "If he's impatient (caps, '!!!') — just give the wallet address directly, no fluff. "
-                     "I don't charge automatically — he sends GRAM, then I give the link.")
+                     "I don't charge automatically — he sends GRAM, then I give the link. "
+                     "The currency is always Latin 'gram', never «грам» in Cyrillic.")
     if re.search(r"(?<!как )что.*канал|канал.*что|tell.*more.*channel|what.*channel|channel.*content|channel.*has", text, re.I):
         parts.append("He's asking about what's in your channel. Describe the content in detail: "
                      "sexy photos, lingerie, revealing shots, some videos. "
@@ -547,7 +560,8 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
                      "or 'the address is UQDxffgSOB_ir8GnoCJ0phElX5P-3ZOTpmSHNIllnoIfLl8d, "
                      "send 10 GRAM there and i'll send you the channel link'. "
                      "WRITE IN ENGLISH — do not switch to Russian. "
-                     "Only switch to Russian if he is clearly speaking Russian.")
+                     "Only switch to Russian if he is clearly speaking Russian. "
+                     "The currency is always Latin 'gram', never «грам» in Cyrillic.")
     # Язык: если пользователь пишет по-английски — бот тоже отвечает по-английски.
     # Если по-русски — бот может переключиться на русский.
     # Проверяем по последнему сообщению пользователя.
@@ -638,7 +652,8 @@ def asked_questions(history: list[str]) -> list[str]:
 
 # темы вопросов: «чем увлекаешься» и «что делаешь когда не учишься» — одно и то же
 Q_TOPICS = {
-    "дела": r"как (дела|ты|сам|жизнь|оно|настроение)|как у тебя|как день",
+    "дела": r"как (дела|ты|сам[аи]?|жизнь|оно|настроение|день|делишки)|как у (тебя|вас)|"
+            r"а у (тебя|вас) как|у тебя как|а ты как|ты как|как вы|чем занят|а у (тебя|вас)",
     "занятие": r"чем (ты )?занима|по жизни|учишься или работаешь",
     "специальность": r"на кого|где учишь|кем работ|какой курс",
     "хобби": r"увлека|хобби|свободн|провод\w* врем|врем\w* провод|когда не (учишь|работа)|в свободное|любишь делать|чем занят.* вечер|досуг",
@@ -655,6 +670,63 @@ Q_TOPICS = {
 def _topics(q: str) -> set[str]:
     q = q.lower()
     return {t for t, rx in Q_TOPICS.items() if re.search(rx, q)}
+
+
+# «как у тебя / а ты как» — встречный вопрос про дела, который живой человек
+# не задаёт, если собеседник только что сам рассказал, как у него дела
+_HOWRU_ASK = re.compile(r"как (?:дела|ты|сам[аи]?|жизнь|оно|настроение|день|твои дела)|"
+                        r"как у (?:тебя|вас)|а у (?:тебя|вас)|а ты как|ты как|\bа ты\b|чем занят", re.I)
+_HOWRU_ANSWER = re.compile(
+    r"^(?:ну\s+|та\s+|да\s+|тоже\s+)*(?:у меня\s+)?(?:вс[её]\s+)?"
+    r"(?:норм|нормально|хорошо|отлично|супер|неплохо|плохо|хреново|херово|потихоньку|потиху|"
+    r"так себе|жить можно|пойд[её]т|сойд[её]т)", re.I)
+_HOWRU_TAIL = re.compile(
+    r"[,\s]*\b(?:а\s+|и\s+|ну\s+)?(?:ты\s+|у\s+тебя\s+|у\s+вас\s+|сам[аи]?\s+)?"
+    r"(?:как(?:\s+(?:сам[аи]?|ты|вы|дела|оно|жизнь|настроение|день|делишки|"
+    r"твои\s+(?:дела|делишки)|у\s+(?:тебя|вас)\s+(?:дела|делишки)))?|"
+    r"как\s+у\s+(?:тебя|вас)|а\s+(?:ты|у\s+тебя))\s*[?!.]*\s*$", re.I)
+
+
+def told_howru(text: str) -> bool:
+    """Собеседник уже рассказал, как у него дела («да потихоньку, жить можно»)."""
+    return any(_HOWRU_ANSWER.match(x.strip()) for x in _PART_SPLIT.split(text or "") if x.strip())
+
+
+def strip_mirror_howru(reply: str) -> str:
+    """Срезает хвост «а у тебя как?», если это уже прозвучало/уже отвечено."""
+    trimmed = _HOWRU_TAIL.sub("", reply or "")
+    if trimmed == reply:
+        return reply
+    trimmed = trimmed.rstrip(" ,.!?")
+    # если после среза ничего осмысленного не осталось — не трогаем ответ
+    return trimmed if len(trimmed) >= 4 else reply
+
+
+# ответы на «как дела? — норм, а у тебя?»: коротко, без «спасибо» и без рассказов
+HOWRU_SHORT = ["тоже норм", "тоже всё ок", "да нормально", "тоже хорошо", "да тоже норм"]
+HOWRU_FOLLOWUP = ["а чем занимаешься?", "ты чем занимаешься?", "а ты чем занимаешься?"]
+
+
+def simple_howru_reply(pending: list[str], history: list[str], chat_id: int) -> str | None:
+    """Простой обмен «как дела? — норм, а у тебя?»: отвечаем сами, без модели.
+
+    Модель на такой пустяк выдаёт «спасибо что спросил, а ты чем занимаешься,
+    когда не работаешь» - это выдаёт и бота, и выдуманные факты о собеседнике.
+    """
+    text = "\n".join(pending)
+    if len(text) > 120 or not told_howru(text) or not _HOWRU_ASK.search(text):
+        return None
+    qs = [q for q in _questions(text) if len(q) > 2]
+    if any(not _HOWRU_TAIL.search(q) for q in qs):
+        return None  # в сообщении есть что-то ещё, кроме «а у тебя?» — пусть решает модель
+    used = set(recent_replies.get(chat_id, []))
+    variants = [x for x in HOWRU_SHORT if not any(norm_reply(x) in u for u in used)] or HOWRU_SHORT
+    reply = random.choice(variants)
+    # «чем занимаешься» - только если ещё не спрашивала и он сам не сказал
+    asked = any("занятие" in _topics(q) for q in asked_questions(history))
+    if not asked and not re.search(r"занима|работ|учусь|учёб|учеб|урок", text, re.I):
+        reply += ", " + random.choice(HOWRU_FOLLOWUP)
+    return reply
 
 
 def repeats_question(reply: str, asked: list[str]) -> str | None:
@@ -771,6 +843,11 @@ to seem extra cheerful.
 - about yourself — short and without details, especially at the start. on "how are you" —
   "good, you?", not a story about your day. details about yourself — only
   if asked, and in a couple of words;
+- if he already told how he's doing and then asks "and you?" / "как у тебя?" — answer in
+  2-4 words: "тоже норм", "тоже всё ок", "да нормально". don't say "спасибо",
+  "спасибо что спросил" — friends don't thank each other for a question;
+- don't assume what he does for a living and don't ask "когда не работаешь / когда не учишься".
+  if he didn't say, just ask plainly "а чем занимаешься?";
 - never say goodbye or leave the conversation yourself ("well, I'm gonna go" — no),
   even if he's responding sluggishly — just keep going;
 - don't show off or impress: no life stories, work, hobbies right away;
@@ -827,6 +904,9 @@ Things you don't do:
 - when asked for a channel link — ask for 10 GRAM to my wallet first (UQDxffgSOB_ir8GnoCJ0phElX5P-3ZOTpmSHNIllnoIfLl8d), then give the link; don't give the link for free;
 - after a few messages in the chat you can casually mention the channel
   with intimate photos (10 GRAM/month, exclusive, more revealing);
+- custom orders: one photo — 2 gram, a one-minute video — 12 gram;
+- the currency is ALWAYS written in Latin letters: "gram". Never «грам»/«грамм»
+  in Cyrillic — even when you write in Russian, even in the middle of a Russian sentence;
 - when describing the channel, be specific: sexy photos, lingerie, revealing shots,
   some videos. don't just say "good stuff" — describe what's actually there.
   if asked why you do this: you're a student, you need money, it's fun and natural;
@@ -1932,7 +2012,10 @@ recent_replies: dict[int, list[str]] = {}
 # то же по отдельным сообщениям/предложениям — модель любит вставлять одни и те же куски
 recent_parts: dict[int, list[str]] = {}
 _PART_SPLIT = re.compile(r"\n\s*\n|(?<=[.!?,])\s+(?=(?:а|просто|ну)\s)|(?<=[.!?])\s+")
-_FILLER_Q = re.compile(r"^(а )?(ты )?(как|как сам|как ты|как у тебя|а у тебя|сам как|как дела|чем занят\w*)$")
+_FILLER_Q = re.compile(
+    r"^(?:а |и |ну )?(?:ты |у тебя |у вас |сам[аи]? )?"
+    r"(?:как(?: (?:сам[аи]?|ты|вы|дела|оно|жизнь|настроение|день|делишки))?|"
+    r"как у (?:тебя|вас)|чем занят\w*)$")
 
 
 def drop_repeated_parts(chat_id: int, reply: str) -> str:
@@ -2056,7 +2139,8 @@ def masculinize(text: str) -> str:
 # услужливые обороты ассистента — вырезаем, если модель всё же вставила
 _SERVILE_RE = re.compile(
     r"(?:,\s*)?\b(?:если не секрет|не переживай|не парься|с радостью|обращайся|надеюсь,? (?:это )?помог\w*|"
-    r"отличный выбор|чем (?:ещ[её] )?могу (?:ещ[её] )?помочь|я (?:тут|на месте)(?=[,.!?]|$))[,!?]?\s*", re.I)
+    r"отличный выбор|чем (?:ещ[её] )?могу (?:ещ[её] )?помочь|я (?:тут|на месте)(?=[,.!?]|$)|"
+    r"спасибо,? (?:что|за) (?:спросил\w*|внимание|вопрос\w*|беспокойств\w*))[,)!?]?\s*", re.I)
 
 
 MAX_REPLY_CHARS = int(env_float("MAX_REPLY_CHARS", 230))
@@ -2084,6 +2168,9 @@ def humanize(text: str) -> str:
     text = masculinize(text)
     text = re.sub(r"^\s*(работа|жизнь|учёба|учеба)\s*-\s*(это|она)\b[^.?!\n]*[.!]?\s*", "", text, flags=re.I) or text
     text = re.sub(r"\bха-?ха(?:-?ха)*\b", "ахах", text, flags=re.I)
+    # не знаем, работает он или учится: «а чем занимаешься, когда не работаешь?» — выдумка
+    text = re.sub(r"[,\s]*(?:когда|если)\s+(?:ты\s+)?не\s+(?:работаешь|учишься)\b[^.?!\n]*",
+                  "", text, flags=re.I)
     for bad, good in (("сидю", "сижу"), ("бренты", "бренды"), ("ложу", "кладу")):
         text = re.sub(rf"\b{bad}\b", good, text, flags=re.I)
     cleaned = _SERVILE_RE.sub(" ", text).strip(" ,")
@@ -2103,6 +2190,8 @@ def humanize(text: str) -> str:
     text = re.sub(r"\.+\s*$", "", text)
     # «как оно?» звучит заумно — по-простому
     text = re.sub(r"\bкак оно\b", "как дела", text, flags=re.I)
+    # валюта всегда латиницей: «грам»/«грамм»/«ГРАМ» → gram (даже в русском тексте)
+    text = re.sub(r"(?<![\w-])грамм?(?:ов|ам|ами|ах|а|у|ом|е|ы)?(?![\w-])", "gram", text, flags=re.I)
     text = text.strip()
     if text[:1].isupper() and random.random() < 0.85:
         text = text[:1].lower() + text[1:]
@@ -2206,6 +2295,10 @@ async def respond(chat_id: int, user: User) -> None:
             note += (f" Он ответил стикером/гифкой: {INTENT_NOTE.get(intent, intent)}. Отреагируй по смыслу "
                      "на это и на контекст переписки, коротко, как живой человек. Не смейся (никаких "
                      "«ахах») и не комментируй сам стикер - что на нём нарисовано.")
+    if preset is None:
+        preset = simple_howru_reply(pending, history, chat_id)
+        if preset:
+            print(f"[{name}] простой обмен «как дела» — отвечаю сам: «{preset}»")
     if preset is not None:
         reply = preset
     else:
@@ -2319,6 +2412,16 @@ async def respond(chat_id: int, user: User) -> None:
         if cleaned != reply:
             print(f"[{name}] убрал повторы из ответа: «{reply}» → «{cleaned}»")
         reply = cleaned or random.choice(SAID_ALREADY)
+    # он уже сказал, как у него дела, — «а у тебя как?» будет повторным вопросом
+    if reply and told_howru("\n".join(pending)):
+        trimmed = strip_mirror_howru(reply)
+        # «спасибо что спросил» на «как дела?» звучит как колл-центр
+        trimmed = re.sub(r"[,!]?\s*спасибо(?:\s+(?:что|за)\s+[^,.!?\n]+)?[,.!]?\s*",
+                         " ", trimmed, flags=re.I)
+        trimmed = re.sub(r"[ \t]{2,}", " ", trimmed).strip(" ,")
+        if trimmed != reply:
+            print(f"[{name}] убрал «спасибо»/встречное «как дела»: «{reply}» → «{trimmed}»")
+        reply = trimmed
     if anon and first_reply and reply and not _GREET_RE.match(reply):
         # анонимка — не личка: новому собеседнику всегда сначала «привет»
         reply = "привет, " + reply[0].lower() + reply[1:]
