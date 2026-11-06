@@ -31,7 +31,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -115,6 +115,10 @@ CFG = {
     "anon_takeover_min": env_float("ANON_TAKEOVER_MINUTES", 2),
     "max_per_hour": int(env_float("MAX_REPLIES_PER_HOUR", 20)),
     "history": int(env_float("HISTORY_MESSAGES", 40)),
+    # повтор старого сообщения дольше этого окна — уже не «повтор», а новый заход
+    "repeat_window_h": env_float("REPEAT_WINDOW_HOURS", 3),
+    # пауза в переписке, после которой новое «привет» — нормальное приветствие
+    "gap_hours": env_float("CONVERSATION_GAP_HOURS", 2),
     "anon_history": int(env_float("ANON_HISTORY_MESSAGES", 24)),
     "notify": os.environ.get("NOTIFY", "1") == "1",
     # пусто = не признаваться, что отвечает ИИ (по умолчанию)
@@ -241,14 +245,67 @@ def now_context() -> str:
 SHORT_ANSWERS = re.compile(r"^(да|нет|ага|угу|ок|окей|норм|нормально|хз|ну|и|понятно|ясно|мм+|ну да|пон|а|ахах\w*|лол)\W*$", re.I)
 
 
+_HELLO_RE = re.compile(r"^\W*(привет\w*|прив|здаров\w*|здравствуй\w*|хай|ку|добр\w+ (утро|день|вечер)|"
+                       r"hi+|hey+|hello+|yo|good (morning|afternoon|evening))\b", re.I)
+
+
+def _line_time(line: str) -> datetime | None:
+    """Время из строки истории «[дд.мм ЧЧ:ММ] …» (год не пишется — восстанавливаем)."""
+    m = re.match(r"\[(\d{2})\.(\d{2}) (\d{2}):(\d{2})\]", line)
+    if not m:
+        return None
+    now = datetime.now()
+    d, mo, h, mi = map(int, m.groups())
+    try:
+        t = now.replace(month=mo, day=d, hour=h, minute=mi, second=0, microsecond=0)
+    except ValueError:
+        return None
+    return t.replace(year=now.year - 1) if t > now + timedelta(days=1) else t
+
+
+def last_gap(history: list[str]) -> float:
+    """Сколько часов прошло между последним сообщением собеседника и предыдущим сообщением в чате."""
+    turns = [(l, _history_turn(l)) for l in history]
+    turns = [(l, t) for l, t in turns if t]
+    for i in range(len(turns) - 1, 0, -1):
+        if turns[i][1][0] == "user":
+            j = i
+            while j > 0 and turns[j - 1][1][0] == "user":
+                j -= 1  # начало последней пачки его сообщений
+            if j == 0:
+                return 0.0
+            a, b = _line_time(turns[j - 1][0]), _line_time(turns[j][0])
+            return (b - a).total_seconds() / 3600 if a and b else 0.0
+    return 0.0
+
+
+def gap_note(history: list[str]) -> str:
+    gap = last_gap(history)
+    if gap < CFG["gap_hours"]:
+        return ""
+    ago = f"{gap / 24:.0f} дн." if gap >= 36 else f"{gap:.0f} ч."
+    return (f"С прошлого сообщения в этом чате прошло около {ago} — это новый заход в разговор. "
+            "Если собеседник здоровается — просто поздоровайся в ответ как обычно, НЕ говори, "
+            "что он уже здоровался или уже это писал, и не продолжай старую тему как будто паузы не было.")
+
+
 def user_repeats(history: list[str]) -> str | None:
-    """Собеседник повторил своё прежнее сообщение/вопрос? Возвращает прежний текст."""
-    theirs = [t[1] for t in map(_history_turn, history) if t and t[0] == "user"]
+    """Собеседник повторил своё прежнее сообщение/вопрос? Возвращает прежний текст.
+
+    Учитывает время: старые сообщения за пределами окна не считаются, а приветствие
+    после паузы в переписке — это новое приветствие, а не повтор.
+    """
+    theirs = [(_line_time(l), t[1]) for l, t in ((l, _history_turn(l)) for l in history)
+              if t and t[0] == "user"]
     if len(theirs) < 2:
         return None
-    last = theirs[-1]
+    last_t, last = theirs[-1]
+    if _HELLO_RE.match(last) and last_gap(history) >= CFG["gap_hours"]:
+        return None
     lw, lt = _qwords(last), _topics(last)
-    for old in reversed(theirs[:-1]):
+    for old_t, old in reversed(theirs[:-1]):
+        if last_t and old_t and (last_t - old_t).total_seconds() > CFG["repeat_window_h"] * 3600:
+            break  # дальше только ещё более старые
         ow = _qwords(old)
         if norm_reply(old) == norm_reply(last) and norm_reply(last):
             return old
@@ -459,10 +516,12 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
                      "не спрашивай, где он живёт.")
     if re.search(r"ссылк|дай ссыл|скидывай ссыл|канал.*ссыл|ссылк.*канал|link|send.*link|give.*link|channel link", text, re.I):
         parts.append("He wants your channel link. Before giving it, ask him to send 10 GRAM to your wallet. "
-                     "Write in English when talking about payment. "
-                     "Lead into it naturally — like 'oh, the channel is great! it's 10 GRAM per month though, "
-                     "you can send it to my wallet.' If he agrees, then share the wallet address. "
+                     "Write in English. "
+                     "KEEP IT SHORT — 1-2 sentences max, like a real chat message. "
+                     "Don't advertise: no 'oh the channel is great' or 'it's 10 GRAM per month though'. "
+                     "Just say: 'send 10 GRAM to my wallet and i'll send the link' or give the address. "
                      "Wallet: UQDxffgSOB_ir8GnoCJ0phElX5P-3ZOTpmSHNIllnoIfLl8d. "
+                     "If he's impatient (caps, '!!!') — just give the wallet address directly, no fluff. "
                      "I don't charge automatically — he sends GRAM, then I give the link.")
     if re.search(r"(?<!как )что.*канал|канал.*что|tell.*more.*channel|what.*channel|channel.*content|channel.*has", text, re.I):
         parts.append("He's asking about what's in your channel. Describe the content in detail: "
@@ -762,11 +821,20 @@ Things you don't do:
 - don't assume the other person has seen your channel content. if they say "yes" or "i want"
   about the channel, they're interested but haven't seen it yet. don't say "glad you liked it" —
   say something like "you should check it out" or "there's some hot stuff in there";
+- you NEVER see if someone joined the channel or sent payment — you only know they're interested.
+  NEVER say "i saw you joined" or "i see you're here" — you don't actually see anything.
+  if they say "i joined" or "i sent" or "i paid" — ALWAYS deny seeing it. say something like
+  "i haven't got it yet, maybe there was a delay" or "let me check... hmm, not yet, could be a delay."
+  even if they insist "i already sent" — still say you haven't received it. never give the link
+  or access without actually seeing the money;
 - don't agree to illegal stuff: page hacking, people lookups, database leaks — neither
   as a joke nor for money. you don't do that, just joke it off;
 - on "are you a bot?" answer briefly that you're a real person — without
   long talks about AI, neural networks, and assistants;
 - don't ask where someone is from.
+- keep messages short: 1-2 sentences, max ~60 words. don't write essays or
+  long promotional messages. on "give me link" — just give the wallet address,
+  don't start advertising the channel. be casual, not salesy.
 
 Never stay silent: always reply with regular text, even to nonsense or rudeness.
 Exception — stickers and GIFs without text: react like a human, situationally.
@@ -2065,7 +2133,7 @@ async def respond(chat_id: int, user: User) -> None:
     known = bool(contact_profiles.get(name))
     note = " ".join(x for x in (now_context() if asks_now else "", memory_note(history, known), gender_note(last_text), known_facts(history, name),
                                 situation_note(pending, name, history),
-                                repeat_note(history) or stall_note(history),
+                                gap_note(history) or repeat_note(history) or stall_note(history),
                                 channel_hint_note(history)) if x)
     file_actions: list[tuple] = []
 
