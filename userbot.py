@@ -127,6 +127,11 @@ CFG = {
     # пусто = не признаваться, что отвечает ИИ (по умолчанию)
     "disclosure": os.environ.get("DISCLOSURE_TEXT", "").strip(),
     "timeout": float(env_str("LLM_TIMEOUT_SECONDS", "DSH_TIMEOUT_SECONDS", default="240")),
+    # У Telethon нет таймаута на запрос: на полумёртвом соединении future не
+    # разрешается никогда, и воркер чата залипает навсегда. Ждём столько секунд.
+    "tg_timeout": float(env_str("TG_TIMEOUT_SECONDS", default="60")),
+    # Сколько секунд один ответ может «думать», прежде чем watchdog его снимет
+    "worker_max": float(env_str("WORKER_MAX_SECONDS", default="900")),
     # Anonymous-chat mode: answer ONLY inside this bot (e.g. AnonRuBot)
     "anon_bot": os.environ.get("ANON_BOT", "").strip().lstrip("@").lower(),
     "auto_next": os.environ.get("AUTO_NEXT", "1") == "1",
@@ -1179,6 +1184,7 @@ async def run_harness(task: str, messages: list[dict] | None = None) -> str:
 client: TelegramClient = None  # created in main()
 me: User | None = None
 workers: dict[int, asyncio.Task] = {}
+worker_started: dict[int, float] = {}  # chat_id → когда текущий ответ начал «думать»
 last_incoming: dict[int, float] = {}
 typing_until: dict[int, float] = {}  # собеседник печатает — ждём, пока допишет
 sent_log: dict[int, list[float]] = {}
@@ -1206,10 +1212,34 @@ def allowed(u: User) -> bool:
     return CFG["allow_non_contacts"] and not u.contact
 
 
+async def tg(aw, timeout: float | None = None):
+    """Telegram-запрос с жёстким таймаутом: у Telethon своего нет.
+
+    Без этого один полумёртвый сокет (Wi-Fi моргнул, ноут ушёл в сон) оставляет
+    future навсегда неразрешённым: процесс жив, в логах тишина, чат мёртв.
+    """
+    try:
+        return await asyncio.wait_for(aw, timeout or CFG["tg_timeout"])
+    except asyncio.TimeoutError:
+        raise RuntimeError("telegram: запрос не ответил вовремя") from None
+
+
+async def tg_iter(aiter, timeout: float | None = None) -> list:
+    """Собрать async-итератор Telethon (iter_messages/iter_dialogs) с общим таймаутом."""
+    out = []
+    try:
+        async with asyncio.timeout(timeout or CFG["tg_timeout"] * 3):
+            async for item in aiter:
+                out.append(item)
+    except TimeoutError:
+        raise RuntimeError("telegram: история не загрузилась вовремя") from None
+    return out
+
+
 async def notify(text: str) -> None:
     if CFG["notify"]:
         try:
-            await client.send_message("me", text[:4000])
+            await tg(client.send_message("me", text[:4000]))
         except Exception as exc:  # noqa: BLE001
             print("[notify]", exc, file=sys.stderr)
 
@@ -1283,7 +1313,7 @@ async def load_doc(m) -> None:
         doc_cache[m.id] = None
         return
     try:
-        raw = await client.download_media(m, file=bytes)
+        raw = await tg(client.download_media(m, file=bytes), CFG["tg_timeout"] * 3)
         doc_cache[m.id] = file_to_text(name, raw or b"", mime)
     except Exception as exc:  # noqa: BLE001
         print(f"[doc] не смог загрузить {m.id}: {exc}", file=sys.stderr)
@@ -1473,7 +1503,7 @@ async def load_voice(m) -> None:
         voice_cache[key] = f"(очень длинное, {dur // 60} мин - ты его не слушал и слушать не хочешь)"
         return
     try:
-        raw = await client.download_media(m, file=bytes)
+        raw = await tg(client.download_media(m, file=bytes), CFG["tg_timeout"] * 3)
         async with _whisper_lock:  # по одному, чтобы не душить CPU
             t0 = time.time()
             text = await asyncio.to_thread(_transcribe, raw)
@@ -1555,7 +1585,7 @@ async def load_photo(m) -> None:
     if m.id in photo_cache:
         return
     try:
-        raw = await client.download_media(m, file=bytes)
+        raw = await tg(client.download_media(m, file=bytes), CFG["tg_timeout"] * 3)
         if not raw:
             return
         from PIL import Image  # noqa: PLC0415
@@ -1609,9 +1639,9 @@ async def load_media_frame(m) -> None:
         mime = (getattr(m.file, "mime_type", "") or "").lower()
         frame = None
         if m.sticker and mime == "application/x-tgsticker":
-            frame = await client.download_media(m, file=bytes, thumb=-1)
+            frame = await tg(client.download_media(m, file=bytes, thumb=-1), CFG["tg_timeout"] * 3)
         else:
-            raw = await client.download_media(m, file=bytes)
+            raw = await tg(client.download_media(m, file=bytes), CFG["tg_timeout"] * 3)
             if raw and mime.startswith("image/"):
                 frame = raw
             elif raw:
@@ -1619,7 +1649,7 @@ async def load_media_frame(m) -> None:
                 suffix = ".webm" if "webm" in mime else ".mp4"
                 frame = await asyncio.to_thread(_frame_from_video, raw, suffix, dur)
             if not frame:  # запасной вариант — превью
-                frame = await client.download_media(m, file=bytes, thumb=-1)
+                frame = await tg(client.download_media(m, file=bytes, thumb=-1), CFG["tg_timeout"] * 3)
         if not frame:
             return
         photo_cache[m.id] = await asyncio.to_thread(_to_data_url, frame)
@@ -1667,7 +1697,7 @@ async def collect_history(chat_id: int, name: str):
     takeover = CFG["anon_takeover_min"] if anon else CFG["takeover_min"]
     cutoff = time.time() - takeover * 60
     limit = CFG["anon_history"] if anon else CFG["history"]
-    msgs = [m async for m in client.iter_messages(chat_id, limit=limit)]
+    msgs = await tg_iter(client.iter_messages(chat_id, limit=limit))
     floor_id = (state.get("anon_partner") or 0) if anon else 0
     for m in [m for m in msgs if is_doc(m) and m.id > floor_id][:DOCS_IN_HISTORY]:  # новые первыми
         await load_doc(m)
@@ -1680,7 +1710,7 @@ async def collect_history(chat_id: int, name: str):
                     if m.reply_to_msg_id and m.reply_to_msg_id not in by_id})
     if missing:
         try:
-            for r in await client.get_messages(chat_id, ids=missing):
+            for r in await tg(client.get_messages(chat_id, ids=missing)):
                 if r:
                     by_id[r.id] = r
         except Exception as exc:  # noqa: BLE001
@@ -1770,7 +1800,7 @@ async def sync_contact(chat_id: int, user: User) -> dict:
     data = load_contact(user.id)
     try:
         kw = {"min_id": data["last_id"]} if data["last_id"] else {}
-        msgs = [m async for m in client.iter_messages(chat_id, limit=BOOTSTRAP_MESSAGES, **kw)]
+        msgs = await tg_iter(client.iter_messages(chat_id, limit=BOOTSTRAP_MESSAGES, **kw), CFG["tg_timeout"] * 3)
         for m in reversed(msgs):
             line = _log_line(m)
             if line:
@@ -2102,7 +2132,7 @@ async def send_human(chat_id: int, text: str, fast: bool = False, started: float
         typing = max(floor, need)
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(typing)
-        msg = await client.send_message(chat_id, part)
+        msg = await tg(client.send_message(chat_id, part))
         remember_bot_msg(chat_id, msg.id)
         sent_log.setdefault(chat_id, []).append(time.time())
         print(f"[{chat_id}] → {part[:120]}")
@@ -2319,7 +2349,7 @@ async def respond(chat_id: int, user: User) -> None:
         await send_human(chat_id, typoed, fast=anon, started=t0)
         if correction:
             await asyncio.sleep(random.uniform(0.5, 1.5))
-            msg = await client.send_message(chat_id, correction)
+            msg = await tg(client.send_message(chat_id, correction))
             remember_bot_msg(chat_id, msg.id)
         await notify(f"🤖 → {name}:\n{reply}")
     if file_actions:
@@ -2351,7 +2381,11 @@ async def worker(chat_id: int, user: User) -> None:
             manual_during.discard(chat_id)
             started = time.time()  # всё, что пришло до этого момента, попадёт в ответ
             try:
-                await respond(chat_id, user)
+                worker_started[chat_id] = time.time()
+                try:
+                    await respond(chat_id, user)
+                finally:
+                    worker_started.pop(chat_id, None)
             except Exception as exc:  # noqa: BLE001
                 print(f"[{chat_id}] error: {exc}", file=sys.stderr)
                 await notify(f"⚠️ не смог ответить {display_name(user)}: {exc}")
@@ -2359,7 +2393,42 @@ async def worker(chat_id: int, user: User) -> None:
             if last_incoming.get(chat_id, 0) <= started:
                 return  # nothing new arrived while we were busy
     finally:
-        workers.pop(chat_id, None)
+        if workers.get(chat_id) is asyncio.current_task():
+            workers.pop(chat_id, None)
+
+
+async def watchdog() -> None:
+    """Сторож от «живого, но мёртвого» процесса.
+
+    Telethon может навсегда залипнуть на полумёртвом TCP-соединении: запрос ушёл,
+    ответ не пришёл, future не разрешается. Снаружи это выглядит как «бот работает,
+    но не отвечает до перезапуска». Раз в минуту проверяем, что Telegram реально
+    отвечает, и снимаем воркеры, которые висят на одном ответе слишком долго.
+    """
+    fails = 0
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await asyncio.wait_for(client.get_me(), 20)
+            fails = 0
+        except Exception as exc:  # noqa: BLE001
+            fails += 1
+            print(f"[watchdog] Telegram не отвечает ({fails}/2): {exc}", file=sys.stderr, flush=True)
+            if fails >= 2:
+                print("[watchdog] соединение мертво — выхожу, чтобы супервизор поднял заново",
+                      file=sys.stderr, flush=True)
+                os._exit(3)
+                return
+        now = time.time()
+        for chat_id, since in list(worker_started.items()):
+            if now - since < CFG["worker_max"]:
+                continue
+            print(f"[watchdog] {chat_id}: ответ висит {int(now - since)} с — перезапускаю воркер",
+                  file=sys.stderr, flush=True)
+            worker_started.pop(chat_id, None)
+            task = workers.pop(chat_id, None)
+            if task and task is not asyncio.current_task():
+                task.cancel()
 
 
 _searching = False
@@ -2380,7 +2449,7 @@ async def anon_next(chat_id: int, reason: str, farewell: str | None = None) -> N
         except Exception as exc:  # noqa: BLE001
             print(f"[anon] farewell error: {exc}", file=sys.stderr)
     await asyncio.sleep(random.uniform(0.8, 2))
-    msg = await client.send_message(chat_id, "/next")
+    msg = await tg(client.send_message(chat_id, "/next"))
     remember_bot_msg(chat_id, msg.id)
     save_state()
     print(f"[anon] скип ({reason}) → /next")
@@ -2396,7 +2465,7 @@ async def auto_search(chat_id: int) -> None:
         await asyncio.sleep(random.uniform(3, 8))
         if state["paused"] or state.get("anon_active"):
             return
-        msg = await client.send_message(chat_id, "/search")
+        msg = await tg(client.send_message(chat_id, "/search"))
         remember_bot_msg(chat_id, msg.id)
         save_state()
         print("[anon] ищу следующего (/search)")
@@ -2463,7 +2532,7 @@ async def on_outgoing(event):
 
 async def resolve_id(arg: str) -> str | None:
     try:
-        ent = await client.get_entity(int(arg) if arg.lstrip("-").isdigit() else arg)
+        ent = await tg(client.get_entity(int(arg) if arg.lstrip("-").isdigit() else arg))
         return str(ent.id)
     except Exception:  # noqa: BLE001
         return None
@@ -2500,7 +2569,7 @@ async def on_command(event):
             "команды: .ub status | pause | resume | mute @user | unmute @user"
         )
     save_state()
-    await event.reply(reply)
+    await tg(event.reply(reply))
 
 
 async def catch_up(max_age_hours: float = 24) -> None:
@@ -2509,7 +2578,7 @@ async def catch_up(max_age_hours: float = 24) -> None:
         # restore whether a stranger is connected right now
         state["anon_active"] = False
         state["anon_gender"] = None
-        async for m in client.iter_messages(CFG["anon_bot"], limit=40):
+        for m in await tg_iter(client.iter_messages(CFG["anon_bot"], limit=40)):
             if m.out or not is_anon_system(m):
                 continue
             if ANON_FOUND_RE.search(m.raw_text or ""):
@@ -2522,7 +2591,7 @@ async def catch_up(max_age_hours: float = 24) -> None:
     if state["paused"]:
         return
     cutoff = time.time() - max_age_hours * 3600
-    async for d in client.iter_dialogs(limit=100):
+    for d in await tg_iter(client.iter_dialogs(limit=100), CFG["tg_timeout"] * 3):
         if not d.is_user or d.unread_count == 0 or not d.message or d.message.out:
             continue
         if d.message.date.timestamp() < cutoff or not allowed(d.entity):
@@ -2617,9 +2686,9 @@ async def main() -> None:
     client.add_event_handler(on_incoming, events.NewMessage(incoming=True, func=lambda e: e.is_private))
     client.add_event_handler(on_outgoing, events.NewMessage(outgoing=True, func=lambda e: e.is_private))
     client.add_event_handler(on_typing, events.UserUpdate())
-    me = await client.get_me()
+    me = await tg(client.get_me(), 60)
     if CFG["anon_bot"]:
-        ANON_CHAT_ID = (await client.get_entity(CFG["anon_bot"])).id
+        ANON_CHAT_ID = (await tg(client.get_entity(CFG["anon_bot"]), 60)).id
     print(f"[userbot] вошёл как {display_name(me)} (@{me.username}); "
           f"белый список={sorted(CFG['allow']) or '—'}, не-контакты={CFG['allow_non_contacts']}, "
           f"анонимный чат=@{CFG['anon_bot'] or '—'}")
@@ -2628,6 +2697,7 @@ async def main() -> None:
     elif not CFG["allow"] and not CFG["allow_non_contacts"]:
         print("[userbot] внимание: белый список пуст — отвечать некому")
     asyncio.create_task(preload_whisper())
+    asyncio.create_task(watchdog())
     await catch_up()
     await client.run_until_disconnected()
 

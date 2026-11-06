@@ -1,17 +1,21 @@
-# Пользовательский сервис systemd. Поправь путь, если клонировал не в ~/tg-llm-userbot:
+# Пользовательский сервис systemd.
 #   cp userbot.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now userbot
+# Restart=always нужен watchdog'у в userbot.py: если Telegram-соединение
+# окончательно повисло, процесс выходит с кодом 3 и systemd поднимает его сам.
 [Unit]
 Description=Telegram LLM userbot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-WorkingDirectory=%h/tg-llm-userbot
-ExecStart=%h/tg-llm-userbot/.venv/bin/python userbot.py
+WorkingDirectory=%h/Documents/deepseek-harness/default-workspace/userbot
+ExecStart=%h/Documents/deepseek-harness/default-workspace/userbot/.venv/bin/python userbot.py
+Environment=PYTHONUNBUFFERED=1
 Restart=always
-RestartSec=10
+RestartSec=5
 
 [Install]
 WantedBy=default.target
