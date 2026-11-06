@@ -110,6 +110,9 @@ CFG = {
     # «печатает» перед отправкой, сек: первое сообщение ответа / последующие. -1 = авто по длине
     "typing_first": env_float("TYPING_FIRST_SECONDS", -1),
     "typing_next": env_float("TYPING_NEXT_SECONDS", -1),
+    # «печатает» растёт с длиной сообщения: ~N символов в секунду, как на телефоне
+    "typing_cps": env_float("TYPING_CHARS_PER_SECOND", 5),
+    "typing_max": env_float("TYPING_MAX_SECONDS", 30),
     "takeover_min": env_float("TAKEOVER_MINUTES", 30),
     # В анонимном чате один общий чат: не глушим его на полчаса из-за одной твоей реплики
     "anon_takeover_min": env_float("ANON_TAKEOVER_MINUTES", 2),
@@ -566,7 +569,8 @@ def stall_note(history: list[str]) -> str:
 
 
 def channel_hint_note(history: list[str]) -> str:
-    """After a few messages — hint at the channel with intimate photos."""
+    """After a few messages — hint at the channel casually, without being pushy.
+    First mention the channel is not free (10 GRAM), then if they want in, give wallet."""
     assistant_count = sum(1 for t in map(_history_turn, history) if t and t[0] == "assistant")
     user_count = sum(1 for t in map(_history_turn, history) if t and t[0] == "user")
     # After 3+ bot replies or 5+ messages from the other person — can hint
@@ -577,14 +581,17 @@ def channel_hint_note(history: list[str]) -> str:
     if re.search(r"channel|sub|exclusive|GRAM|TON|10", recent, re.I):
         return ""
     hints = [
-        "You can casually mention your Telegram channel — it has exclusive, more revealing photos. "
-        "Subscription is 10 GRAM (TON), not free. "
-        "Don't give the link for free — ask for GRAM to your wallet first, then give the link.",
-        "Now's a good time to mention the channel — lots of hot photos there, 10 GRAM subscription. "
-        "Say it lightly, without being pushy. If they ask for the link — ask for payment to the wallet first.",
-        "You can mention the channel — guys are usually interested. Something like 'there's even more "
-        "of that in the channel' or 'you should check it out if you want to see something hotter'. "
-        "10 GRAM to my wallet: UQDxffgSOB_ir8GnoCJ0phElX5P-3ZOTpmSHNIllnoIfLl8d",
+        "You can casually drop a mention of your channel — like it's no big deal. "
+        "It's not free though, 10 GRAM per month. "
+        "If they seem interested or ask for the link, give them your wallet address: "
+        "UQDxffgSOB_ir8GnoCJ0phElX5P-3ZOTpmSHNIllnoIfLl8d",
+        "You could mention the channel — it has some nice photos. "
+        "Entry's 10 GRAM, not free. "
+        "Keep it light, don't push it. If they want in, they'll ask — then give the wallet address.",
+        "There's a good chance they'd be interested in your channel. "
+        "Just say something casual like 'the channel's pretty good actually' — "
+        "it's 10 GRAM to join. "
+        "Don't give the link right away — let them ask, then give the wallet address.",
     ]
     return random.choice(hints)
 
@@ -2072,16 +2079,27 @@ def humanize(text: str) -> str:
     return text
 
 
-async def send_human(chat_id: int, text: str, fast: bool = False) -> None:
+def typing_seconds(part: str) -> float:
+    """Сколько живой человек набирал бы это сообщение: длиннее текст — дольше «печатает»."""
+    cps = max(0.5, CFG["typing_cps"]) * random.uniform(0.8, 1.25)
+    return min(CFG["typing_max"], len(part) / cps)
+
+
+async def send_human(chat_id: int, text: str, fast: bool = False, started: float | None = None) -> None:
+    """started — когда начали «думать» над ответом: это время уже засчитывается в набор
+    первого сообщения (пока модель генерирует, «печатает» и так висит)."""
     # каждое отдельное сообщение — без точки в конце
     parts = [re.sub(r"\.+$", "", p.strip()) for p in re.split(r"\n\s*\n", text) if p.strip()][:4]
     parts = [p for p in parts if p]
     for i, part in enumerate(parts):
-        # модель и так думает долго (и всё это время висит «печатает»),
-        # поэтому перед отправкой — только короткий штрих «печатает»
-        typing = CFG["typing_first"] if i == 0 else CFG["typing_next"]
-        if typing < 0:
-            typing = min(1.5, 0.3 + len(part) / random.uniform(40, 60))
+        # фиксированные TYPING_*_SECONDS — минимум, сверху добавляется время на набор по длине
+        floor = CFG["typing_first"] if i == 0 else CFG["typing_next"]
+        if floor < 0:
+            floor = min(1.5, 0.3 + len(part) / random.uniform(40, 60))
+        need = typing_seconds(part)
+        if i == 0 and started:
+            need -= time.time() - started
+        typing = max(floor, need)
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(typing)
         msg = await client.send_message(chat_id, part)
@@ -2298,7 +2316,7 @@ async def respond(chat_id: int, user: User) -> None:
         await asyncio.sleep(random.uniform(0.3, 1))
     if reply:
         typoed, correction = add_typo(split_messages(reply))
-        await send_human(chat_id, typoed, fast=anon)
+        await send_human(chat_id, typoed, fast=anon, started=t0)
         if correction:
             await asyncio.sleep(random.uniform(0.5, 1.5))
             msg = await client.send_message(chat_id, correction)
