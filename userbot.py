@@ -534,6 +534,16 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
                      "Answer short, one or two sentences, like a normal chat message. "
                      "Always write the currency in Latin letters: 'gram' — never «грам» in Cyrillic, "
                      "even if you answer in Russian.")
+    if re.search(r"for free|free\s+(?:photos?|pics?|pictures?|shots?|videos?|sample|stuff|content|nudes?)|"
+                 r"бесплат|даром|за так|скидк|дешевл|discount|cheaper|"
+                 r"\bsample\b|пробн|no money|нет денег|без денег|не могу заплат|can'?t pay|"
+                 r"don'?t have money|not paying", text, re.I):
+        parts.append("He wants something free, a sample or a discount, or says he has no money. "
+                     "NEVER promise to send anything for free, never offer a sample, a free photo/video "
+                     "or a discount, never lower the price and don't haggle. Calmly say you don't send "
+                     "anything for free and name the price: one photo - 2 gram, a one-minute video - "
+                     "12 gram, the channel - 10 gram a month. One short message, no excuses. "
+                     "The currency is always Latin 'gram'. Answer in his language.")
     if re.search(r"ссылк|дай ссыл|скидывай ссыл|канал.*ссыл|ссылк.*канал|link|send.*link|give.*link|channel link", text, re.I):
         parts.append("He wants your channel link. Before giving it, ask him to send 10 GRAM to your wallet. "
                      "Write in English. "
@@ -901,6 +911,13 @@ Things you don't do:
   photos; don't promise things on behalf of the owner;
 - don't give channel access for free — the channel costs money, it's your income;
 - don't give away photos for free — I don't hand them out for nothing, GRAM to my wallet: UQDxffgSOB_ir8GnoCJ0phElX5P-3ZOTpmSHNIllnoIfLl8d;
+- NEVER promise to send anything for free: no "sample", no free photos/videos, no "just this once".
+  if he asks for free stuff, a discount, or says he has no money — calmly say you don't send anything
+  for free and repeat the price: one photo 2 gram, a one-minute video 12 gram, channel 10 gram/month;
+- never lower the price or haggle. the price is fixed: one photo 2 gram, a one-minute video 12 gram,
+  the channel 10 gram/month. don't invent bundles or "deals";
+- don't laugh in every message. never start a reply with "haha"/"hehe"/"ахах". laugh only if he
+  actually said something funny, and at most occasionally — not as a filler;
 - when asked for a channel link — ask for 10 GRAM to my wallet first (UQDxffgSOB_ir8GnoCJ0phElX5P-3ZOTpmSHNIllnoIfLl8d), then give the link; don't give the link for free;
 - after a few messages in the chat you can casually mention the channel
   with intimate photos (10 GRAM/month, exclusive, more revealing);
@@ -1964,6 +1981,8 @@ def rate_ok(chat_id: int, anon: bool = False) -> bool:
     log = [t for t in sent_log.get(chat_id, []) if now - t < 3600]
     sent_log[chat_id] = log
     limit = CFG["anon_max_per_hour"] if anon else CFG["max_per_hour"]
+    if limit <= 0:
+        return True  # 0 = без лимита
     return len(log) < limit
 
 
@@ -2006,6 +2025,48 @@ _SHADY_RE = re.compile(r"наркот|закладк|кладмен|\bмеф|\b�
                        r"скам|развод\w* (людей|мамонт)|мамонт", re.I)
 SHADY_REFUSALS = ["не, таким не занимаюсь", "не, я по белому только"]
 SAID_ALREADY = ["ну я ж говорю", "ну вот так", "я уже сказал", "короче да"]
+
+# «пришлю бесплатно / вот тебе sample / скину пару фото просто так» — так нельзя.
+# Ловим сам обещанный жест, а не цену: если цена в ответе уже названа, не трогаем.
+_FREE_PROMISE_RE = re.compile(
+    r"(?:(?:let me|i(?:'ll| will| can| could)?)\s+(?:just\s+)?send\s+(?:you\s+)?"
+    r"(?:(?:a\s+couple(?:\s+of)?|a\s+few|some|a|the)\s+)?(?:\w+\s+){0,3}"
+    r"(?:photos?|pics?|pictures?|shots?|videos?|nudes?|sample)|"
+    r"here(?:'s| is| are)\s+(?:a\s+|one\s+|another\s+|some\s+)?(?:sample|free|photos?|pics?|shots?)|"
+    r"free\s+(?:photos?|pics?|pictures?|shots?|videos?|nudes?|sample|stuff|content)|"
+    r"(?:for\s+free|no\s+need\s+to\s+pay|no\s+payment|without\s+paying|free\s+of\s+charge)|"
+    r"(?:бесплатн\w*|даром|за\s+так|без\s+оплаты|без\s+денег|пробн\w*\s+(?:фото|сним|кадр)))", re.I)
+_PRICE_COMMIT_RE = re.compile(
+    r"(?:for|send|pay|costs?)\s*(?:\d+\s*)?gram|gram\s+(?:first|to\s+my\s+wallet)|after\s+(?:the\s+)?payment", re.I)
+_HAGGLE_RE = re.compile(
+    r"\b(?:discount|cheaper|lower (?:the )?price|reduce (?:the )?price|make (?:me )?an offer|"
+    r"how much (?:can|are) you (?:pay|willing)|what can you pay|(?:okay|ok),?\s+deal)\b|"
+    r"скидк|дешевл|торг|договоримся|сколько (?:можешь|готов) заплат", re.I)
+# «я не отправляю бесплатно» / «скидок нет» — это отказ, а не обещание: не трогаем
+_NEG_FREE_RE = re.compile(
+    r"\b(?:i\s+)?(?:don'?t|do\s+not|doesn'?t|never|not|no|nothing|can'?t|cannot|won'?t|will\s+not)\b"
+    r"(?:(?!\bbut\b)[^.!?\n]){0,70}?"
+    r"\b(?:for\s+free|free|freebies?|samples?|discounts?|cheaper|"
+    r"lower\s+(?:the\s+)?price|reduce\s+(?:the\s+)?price)\b", re.I)
+
+
+def price_guard_needed(reply: str) -> bool:
+    """Обещает ли ответ бесплатное/скидку (уже с учётом отрицаний)."""
+    probe = _NEG_FREE_RE.sub(" ", reply or "")
+    return ((bool(_FREE_PROMISE_RE.search(probe)) and not _PRICE_COMMIT_RE.search(probe))
+            or bool(_HAGGLE_RE.search(probe)))
+PRICE_HOLD_EN = [
+    "i don't send anything for free and i don't lower the price. one photo - 2 gram, "
+    "a one-minute video - 12 gram, the channel - 10 gram a month",
+    "nah, nothing for free and no discounts. one photo - 2 gram, a one-minute video - 12 gram, "
+    "the channel - 10 gram a month",
+]
+PRICE_HOLD_RU = [
+    "бесплатно ничего не отправляю и цену не снижаю. одно фото - 2 gram, "
+    "видео на минуту - 12 gram, канал - 10 gram в месяц",
+    "не, бесплатно и без скидок. одно фото - 2 gram, видео на минуту - 12 gram, "
+    "канал - 10 gram в месяц",
+]
 
 # последние отправленные реплики на чат (нормализованные) — для анти-дубля
 recent_replies: dict[int, list[str]] = {}
@@ -2162,6 +2223,33 @@ def clamp_length(text: str) -> str:
     return out.rstrip(" ,.")
 
 
+_LAUGH_TOKEN = re.compile(
+    r"^(?:ha(?:-?ha)*h?|hah+|he(?:-?he)+h*|heh+|а?ха(?:-?ха)*х*|хе(?:-?хе)+х*|хех+|"
+    r"лол|lol|lmao|rofl)$", re.I)
+
+
+def strip_leading_laughs(text: str) -> str:
+    """«haha, ...» в начале каждой реплики — самый заметный признак бота.
+
+    Срезаем смех в начале, если после него есть смысл. Если весь ответ — смех,
+    оставляем как есть (живой человек тоже иногда просто смеётся).
+    """
+    words = re.findall(r"[\wА-Яа-яЁё-]+", text or "")
+    if not words or all(_LAUGH_TOKEN.match(w) for w in words):
+        return text
+    out = text
+    for _ in range(3):
+        m = re.match(r"^\s*([^\wА-Яа-яЁё]*)([\wА-Яа-яЁё-]+)([\s,.!…)\-]*)", out)
+        if not m or not _LAUGH_TOKEN.match(m.group(2)):
+            break
+        rest = out[m.end():]
+        if not re.search(r"[\wА-Яа-яЁё]", rest):
+            break
+        out = rest
+    out = re.sub(r"^[\s,.!…)\-]+", "", out)
+    return out or text
+
+
 def humanize(text: str) -> str:
     """Long dashes are a dead giveaway; also strip stray markdown."""
     text = _DASHES.sub("-", text)
@@ -2184,6 +2272,7 @@ def humanize(text: str) -> str:
     stripped = _FILLER_RE.sub("", text, count=1)
     if len(stripped) >= 8:
         text = stripped[:1].lower() + stripped[1:]
+    text = strip_leading_laughs(text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     # точка в конце сообщения в мессенджере выглядит холодно/по-ботски — убираем
@@ -2422,6 +2511,11 @@ async def respond(chat_id: int, user: User) -> None:
         if trimmed != reply:
             print(f"[{name}] убрал «спасибо»/встречное «как дела»: «{reply}» → «{trimmed}»")
         reply = trimmed
+    if reply and price_guard_needed(reply):
+        # бесплатных фото/видео и «sample» не обещаем никогда, цену не двигаем
+        ru = bool(re.search(r"[а-яёА-ЯЁ]", "\n".join(pending), re.I))
+        reply = random.choice(PRICE_HOLD_RU if ru else PRICE_HOLD_EN)
+        print(f"[{name}] бесплатное/торг — держу цену: «{reply}»")
     if anon and first_reply and reply and not _GREET_RE.match(reply):
         # анонимка — не личка: новому собеседнику всегда сначала «привет»
         reply = "привет, " + reply[0].lower() + reply[1:]
