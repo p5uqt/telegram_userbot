@@ -1497,8 +1497,20 @@ def _waveform(path: Path) -> bytes | None:
     return encode_waveform(bytes(min(31, p * 31 // top) for p in peaks))
 
 
+def _audio_codec(path: Path) -> str:
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                            "stream=codec_name", "-of", "default=nw=1:nk=1", str(path)],
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout.strip().lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _prepare_voice(src: Path) -> tuple[Path, float, bytes | None] | None:
-    path = src if src.suffix.lower() in (".ogg", ".oga", ".opus") else _cached_convert(
+    # голосовое в Telegram — это Opus в OGG; .ogg с Vorbis внутри тоже перекодируем
+    native = src.suffix.lower() in (".ogg", ".oga", ".opus") and _audio_codec(src) == "opus"
+    path = src if native else _cached_convert(
         src, ".ogg", ["-vn", "-ac", "1", "-c:a", "libopus", "-b:a", "48k", "-application", "voip"])
     if not path:
         return None
