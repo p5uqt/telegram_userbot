@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# ub — управление запущенным ботом (в отдельном терминале). ./ub help
+cd "$(dirname "$0")" || exit 1
+exec .venv/bin/python ub.py "$@"

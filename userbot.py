@@ -1016,6 +1016,17 @@ me: User | None = None
 workers: dict[int, asyncio.Task] = {}
 worker_started: dict[int, float] = {}  # chat_id → когда текущий ответ начал «думать»
 last_incoming: dict[int, float] = {}
+# указания владельца из «Избранного» (.ub tell): chat_id → (текст, когда дано)
+owner_hints: dict[int, tuple[str, float]] = {}
+OWNER_HINT_TTL = 30 * 60  # неисполненное указание через полчаса забывается
+
+
+def owner_hint(chat_id: int) -> tuple[str, float] | None:
+    h = owner_hints.get(chat_id)
+    if h and time.time() - h[1] > OWNER_HINT_TTL:
+        owner_hints.pop(chat_id, None)
+        return None
+    return h
 typing_until: dict[int, float] = {}  # собеседник печатает — ждём, пока допишет
 sent_log: dict[int, list[float]] = {}
 manual_during: set[int] = set()  # chats where you typed yourself while the model was thinking
@@ -1253,11 +1264,12 @@ def extract_file_actions(raw: str) -> tuple[str, list[tuple]]:
     return re.sub(r"\n{3,}", "\n\n", rest).strip(), acts[:3]
 
 
-async def do_file_actions(chat_id: int, acts: list[tuple], name: str, anon: bool = False) -> None:
+async def do_file_actions(chat_id: int, acts: list[tuple], name: str, anon: bool = False,
+                          now: bool = False) -> None:
     for act in acts:
         if act[0] == "media":
             try:
-                await do_media_action(chat_id, act[1], name, anon)
+                await do_media_action(chat_id, act[1], name, anon, now)
             except Exception as exc:  # noqa: BLE001
                 it = find_media(act[1])
                 if it:
@@ -1338,9 +1350,11 @@ for _chat in state.get("media_chats", {}).values():
         del _chat[_k]
 
 
-def load_media() -> dict[str, dict]:
-    """имя (путь от MEDIA_DIR) → {path, kind, about, when, delay}. Только включённые виды."""
-    if not MEDIA_SEND or not MEDIA_DIR.is_dir():
+def load_media(kinds: set[str] | None = None) -> dict[str, dict]:
+    """имя (путь от MEDIA_DIR) → {path, kind, about, when, delay}. По умолчанию — только
+    включённые в MEDIA_SEND виды; команды из «Избранного» видят все."""
+    kinds = MEDIA_SEND if kinds is None else kinds
+    if not kinds or not MEDIA_DIR.is_dir():
         return {}
     meta: dict[str, dict] = {}
     mf = MEDIA_DIR / "media.toml"
@@ -1354,7 +1368,7 @@ def load_media() -> dict[str, dict]:
         except Exception as exc:  # noqa: BLE001
             print(f"[медиа] media.toml не читается: {exc}", file=sys.stderr)
     items: dict[str, dict] = {}
-    for kind in (k for k in MEDIA_KINDS if k in MEDIA_SEND):
+    for kind in (k for k in MEDIA_KINDS if k in kinds):
         base = MEDIA_DIR / kind
         if not base.is_dir():
             continue
@@ -1376,9 +1390,9 @@ def load_media() -> dict[str, dict]:
     return dict(list(items.items())[:60])
 
 
-def find_media(name: str) -> dict | None:
+def find_media(name: str, kinds: set[str] | None = None) -> dict | None:
     want = (name or "").strip().strip("«»\"'`").lower()
-    items = load_media()
+    items = load_media(kinds)
     for rel, it in items.items():
         if rel.lower() == want:
             return it
@@ -1407,9 +1421,9 @@ def media_status(chat_id: int) -> str:
     return " ".join(parts)
 
 
-def media_note() -> str:
+def media_note(kinds: set[str] | None = None) -> str:
     """Список медиа для системного промпта (одинаковый для всех чатов — кэшируется)."""
-    items = load_media()
+    items = load_media(kinds)
     if not items:
         return ""
     lines = []
@@ -1417,7 +1431,7 @@ def media_note() -> str:
         when = "можно сразу" if it["when"] == "now" else "ПОТЯНИ ВРЕМЯ"
         lines.append(f"- {rel} [{MEDIA_KIND_RU[it['kind']]}, {when}]: {it['about']}")
     plural = {"photo": "фото", "video": "видео", "voice": "голосовые", "round": "кружочки"}
-    kinds = ", ".join(plural[k] for k in MEDIA_KINDS if k in MEDIA_SEND)
+    kinds = ", ".join(plural[k] for k in MEDIA_KINDS if k in {i["kind"] for i in items.values()})
     return (
         "=== Твои медиа ===\n"
         f"У тебя есть свои готовые {kinds} (это исключение из правила «не давай фото»: эти - можно):\n"
@@ -1543,9 +1557,10 @@ def _media_label(it: dict) -> str:
     return f"[ты отправил {MEDIA_KIND_RU[it['kind']]}: {it['about']}]"
 
 
-async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | None) -> None:
+async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | None,
+                         force: bool = False) -> None:
     done = media_sent_in(chat_id)
-    if state["paused"] or str(chat_id) in state["muted"]:
+    if not force and (state["paused"] or str(chat_id) in state["muted"]):
         done.pop(it["name"], None)
         save_state()
         return
@@ -1569,8 +1584,8 @@ async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | 
     await notify(f"🖼 → {name}: {MEDIA_KIND_RU[it['kind']]} {it['name']}")
 
 
-async def do_media_action(chat_id: int, ref: str, name: str, anon: bool = False) -> None:
-    it = find_media(ref)
+async def do_media_action(chat_id: int, ref: str, name: str, anon: bool = False, now: bool = False) -> None:
+    it = find_media(ref, set(MEDIA_KINDS) if now else None)  # по твоему указанию — любые виды
     if not it:
         print(f"[{name}] медиа «{ref}» нет / вид выключен (MEDIA_SEND)")
         await notify(f"🖼 {name}: модель хотела отправить «{ref}», такого нет")
@@ -1580,7 +1595,7 @@ async def do_media_action(chat_id: int, ref: str, name: str, anon: bool = False)
         print(f"[{name}] {it['name']} уже {'отправлено' if done[it['name']] == 'sent' else 'в очереди'} — не дублирую")
         return
     anon_partner = state.get("anon_partner") if anon else None
-    if it["when"] == "now":
+    if it["when"] == "now" or now:  # now — ты сам попросил через .ub tell: без оттягивания
         done[it["name"]] = "pending"
         await asyncio.sleep(random.uniform(1, 4))
         await _deliver_media(chat_id, it, name, anon_partner)
@@ -2564,11 +2579,14 @@ async def respond(chat_id: int, user: User) -> None:
         return
     name = ANON_NAME if anon else display_name(user)
     t0 = time.time()
+    hint = owner_hint(chat_id)
+    hint_text = hint[0] if hint else ""
     history, manual_recent, last_text, last_manual_ts = await collect_history(chat_id, name)
     last_turn = next((t for t in map(_history_turn, reversed(history)) if t), None)
-    if last_turn and last_turn[0] == "assistant":
+    proactive = bool(last_turn and last_turn[0] == "assistant")  # собеседник молчит, пишем первыми
+    if proactive and not hint_text:
         return  # на всё уже ответили
-    if manual_recent:
+    if manual_recent and not hint_text:
         if not anon:
             print(f"[{name}] ты недавно писал сам — пропускаю")
             return
@@ -2597,6 +2615,21 @@ async def respond(chat_id: int, user: User) -> None:
                                 situation_note(pending, name, history),
                                 gap_note(history) or repeat_note(history) or stall_note(history),
                                 media_status(chat_id) if MEDIA_SEND else "") if x)
+    first_extra = ""
+    if hint_text:
+        print(f"[{name}] указание от тебя: «{hint_text}»")
+        note += (f" ГЛАВНОЕ: твоё собственное намерение (собеседник его не видел): «{hint_text}». "
+                 "Выполни его в этом ответе естественно, своими словами, как будто сам захотел. "
+                 "Тема - плавно переведи разговор на неё. Отправить медиа - поставь тег [медиа: имя] "
+                 "из списка (подходящее по описанию) - можно, даже если он не просил. "
+                 "Не упоминай, что тебя кто-то попросил.")
+        if not MEDIA_SEND and re.search(r"фот|видео|видос|голосов|гс|войс|кружо|кружк|скинь|отправь|покажи",
+                                        hint_text, re.I):
+            note += " " + media_note(set(MEDIA_KINDS)).replace("\n", " ")  # отправка выключена, но ты сам просишь
+        if proactive or not last_turn:
+            first_extra = ("Собеседник пока ничего нового не писал. Напиши ему сам новое сообщение "
+                           "по своему намерению выше, как будто сам решил написать. Не повторяй "
+                           "свои прошлые сообщения.")
     file_actions: list[tuple] = []
 
     def pull(raw: str) -> str:
@@ -2606,7 +2639,7 @@ async def respond(chat_id: int, user: User) -> None:
         return strip_fake_media(text)
 
     preset = None
-    if media_only(pending):
+    if media_only(pending) and not hint_text:
         intent = await sticker_intent(history)
         print(f"[{name}] стикер/гифка: «{intent}»")
         if intent in STICKER_SILENT:
@@ -2620,7 +2653,7 @@ async def respond(chat_id: int, user: User) -> None:
             note += (f" Он ответил стикером/гифкой: {INTENT_NOTE.get(intent, intent)}. Отреагируй по смыслу "
                      "на это и на контекст переписки, коротко, как живой человек. Не смейся (никаких "
                      "«ахах») и не комментируй сам стикер - что на нём нарисовано.")
-    if preset is None:
+    if preset is None and not hint_text:
         preset = simple_howru_reply(pending, history, chat_id)
         if preset:
             print(f"[{name}] простой обмен «как дела» — отвечаю сам: «{preset}»")
@@ -2628,13 +2661,14 @@ async def respond(chat_id: int, user: User) -> None:
         reply = preset
     else:
         async with client.action(chat_id, "typing"):
-            reply = pull(await run_harness(build_task(name, history, note=note), build_messages(name, history, note=note)))
+            reply = pull(await run_harness(build_task(name, history, first_extra, note),
+                                           build_messages(name, history, first_extra, note)))
     if state["paused"] or chat_id in manual_during:  # you jumped in meanwhile
         return
     if anon and not state.get("anon_active"):
         return  # stranger left while the model was thinking
     tag = service_tag(reply)
-    if media_only(pending) and (tag == "skip" or (not humanize(reply) and not file_actions)):
+    if media_only(pending) and not hint_text and (tag == "skip" or (not humanize(reply) and not file_actions)):
         print(f"[{name}] стикер/гифка — не отвечаю, по ситуации не нужно")
         return
     # пусто / [SKIP] — переспрашиваем раз
@@ -2739,16 +2773,20 @@ async def respond(chat_id: int, user: User) -> None:
     if anon and first_reply and reply and not _GREET_RE.match(reply):
         # анонимка — не личка: новому собеседнику всегда сначала «привет»
         reply = "привет, " + reply[0].lower() + reply[1:]
+    new_hint = owner_hint(chat_id)
+    if new_hint and new_hint[1] > t0:
+        print(f"[{name}] пока думал, ты дал новое указание — переделываю ответ")
+        return  # worker перезапустит ответ уже с новым указанием
+    if last_incoming.get(chat_id, 0) > t0 or time.time() < typing_until.get(chat_id, 0):
+        print(f"[{name}] пока думал, пришло новое — отвечу на всё сразу")
+        return  # worker увидит новое сообщение и сгенерирует ответ на всю пачку
     if reply:
         recent_replies.setdefault(chat_id, []).append(norm_reply(reply))
         recent_parts.setdefault(chat_id, []).extend(
             norm_reply(p) for p in _PART_SPLIT.split(reply) if norm_reply(p))
         del recent_parts[chat_id][:-20]  # помним ~20 последних кусочков своих реплик
     del recent_replies[chat_id][:-6]  # помним последние 6 своих реплик
-    if last_incoming.get(chat_id, 0) > t0 or time.time() < typing_until.get(chat_id, 0):
-        print(f"[{name}] пока думал, пришло новое — отвечу на всё сразу")
-        return  # worker увидит новое сообщение и сгенерирует ответ на всю пачку
-    if file_actions and not MEDIA_SELF and any(a[0] == "media" for a in file_actions):
+    if file_actions and not MEDIA_SELF and not hint_text and any(a[0] == "media" for a in file_actions):
         asked = media_requested("\n".join(pending))
         keep = []
         for a in file_actions:
@@ -2786,8 +2824,11 @@ async def respond(chat_id: int, user: User) -> None:
             msg = await tg(client.send_message(chat_id, correction))
             remember_bot_msg(chat_id, msg.id)
         await notify(f"🤖 → {name}:\n{reply}")
+    if hint and owner_hints.get(chat_id) == hint:
+        owner_hints.pop(chat_id, None)  # указание выполнено
+        await notify(f"✅ {name}: указание выполнено")
     if file_actions:
-        await do_file_actions(chat_id, file_actions, name, anon)
+        await do_file_actions(chat_id, file_actions, name, anon, now=bool(hint_text))
     await burn_ttl(chat_id)
     if not anon:
         await sync_contact(chat_id, user)
@@ -2802,7 +2843,7 @@ async def worker(chat_id: int, user: User) -> None:
             started = time.time()
             anon = is_anon_bot(user)
             # без искусственной паузы на «прочтение»: модель и так думает долго
-            if not anon and CFG["read_max"] > 0:
+            if not anon and CFG["read_max"] > 0 and not owner_hint(chat_id):
                 await asyncio.sleep(random.uniform(CFG["read_min"], CFG["read_max"]))
             # wait until the person has stopped sending a burst of messages
             quiet = 2 if anon else CFG["quiet"]
@@ -2826,7 +2867,8 @@ async def worker(chat_id: int, user: User) -> None:
                 print(f"[{chat_id}] error: {exc}", file=sys.stderr)
                 await notify(f"⚠️ не смог ответить {display_name(user)}: {exc}")
                 return
-            if last_incoming.get(chat_id, 0) <= started:
+            h = owner_hint(chat_id)
+            if last_incoming.get(chat_id, 0) <= started and not (h and h[1] > started):
                 return  # nothing new arrived while we were busy
     finally:
         if workers.get(chat_id) is asyncio.current_task():
@@ -3013,46 +3055,344 @@ async def sync_all_contacts(max_age_hours: float = 72) -> None:
         print(f"[memory] после запуска дописал историю в {n} чат(ов)")
 
 
-async def resolve_id(arg: str) -> str | None:
+# ── команды: общие для ./ub и «Избранного» (.ub ...) ────────────────────
+# (команда, аргументы, описание, только в ub)
+COMMANDS = [
+    ("help", "[команда]", "эта справка; help <команда> — подробно", False),
+    ("status", "", "состояние бота: пауза, белый список, заглушённые, указания", False),
+    ("chats", "[n]", "последние личные чаты (по умолчанию 15) с номерами для open", False),
+    ("open", "<кто>", "открыть чат: показать переписку и дальше показывать новые сообщения вживую", True),
+    ("close", "", "закрыть открытый чат", True),
+    ("history", "[кто] [n]", "последние n сообщений (по умолчанию 20)", False),
+    ("tell", "[кто] <текст>", "указание боту: тема, вопрос, «скинь фото кота» — выполнит своими словами", False),
+    ("forget", "[кто]", "отменить указание", False),
+    ("write", "[кто] <текст>", "написать сообщение от себя (бот уступит тебе на TAKEOVER_MINUTES)", False),
+    ("send", "[кто] <файл>", "сразу отправить медиа из media/ без модели", False),
+    ("media", "", "список медиа с описаниями", False),
+    ("pause", "", "поставить все автоответы на паузу", False),
+    ("resume", "", "снять с паузы", False),
+    ("mute", "[кто]", "не отвечать этому человеку", False),
+    ("unmute", "[кто]", "снова отвечать", False),
+    ("logs", "on|off", "показывать здесь лог бота (по умолчанию off)", True),
+    ("clear", "", "очистить экран", True),
+    ("exit", "", "выйти из ub (бот продолжает работать; Ctrl+D — то же)", True),
+]
+HELP_DETAILS = {
+    "кто": "<кто> — @username, числовой id, номер из списка chats или anon (анонимный чат). "
+           "Если чат открыт (open), <кто> можно не писать — берётся открытый.",
+    "tell": "Пример: tell @masha переведи разговор на концерт в субботу\n"
+            "Собеседник указание не видит. Если он молчит — бот напишет сам и сразу. Если бот как раз "
+            "думает — ответ переделается с указанием. Новое указание заменяет старое, невыполненное "
+            "забывается через 30 мин. Медиа по указанию уходит даже при выключенном MEDIA_SEND.",
+    "send": "Пример: send @masha cat.jpg   (имя файла или путь от media/, список — media)",
+    "write": "Пример: write привет, это я сам\nСообщение уходит от тебя, как будто ты написал с телефона: "
+             "бот это заметит и замолчит в этом чате на TAKEOVER_MINUTES.",
+    "open": "Пример: open @masha   или   open 3   (номер из chats)\nПосле open команды tell/write/send/... "
+            "можно писать без <кто>, а в чате видно: ← он, → бот, ✎ ты сам.",
+    "logs": "logs on — показывать в ub всё, что бот пишет в свой терминал (run.sh). "
+            "logs off — только открытый чат и ответы на команды.",
+}
+_last_chats: list[User] = []   # номера для «open 3»
+
+
+def help_text(cmd: str = "", console: bool = True) -> str:
+    pre = "" if console else ".ub "
+    if cmd:
+        c = next((c for c in COMMANDS if c[0] == cmd), None)
+        if not c:
+            return f"нет команды «{cmd}» — help"
+        return (f"{pre}{c[0]} {c[1]}\n  {c[2]}"
+                + (f"\n{HELP_DETAILS[cmd]}" if cmd in HELP_DETAILS else "")
+                + ("" if console or not c[3] else "\n(только в ub)"))
+    rows = [f"  {pre}{name} {args}".ljust(30) + f" {desc}"
+            for name, args, desc, only_console in COMMANDS if console or not only_console]
+    who = HELP_DETAILS["кто"] if console else HELP_DETAILS["кто"].split(" Если чат открыт")[0]
+    return "Команды:\n" + "\n".join(rows) + "\n\n" + who + f"\nПодробнее: {pre}help <команда>"
+
+
+def _looks_like_target(tok: str) -> bool:
+    return tok.startswith("@") or tok.lstrip("-").isdigit() or tok.lower() in ("anon", "аноним", "анон")
+
+
+async def resolve_chat(arg: str) -> User | None:
+    """@username / id / номер из chats / anon → пользователь (в личке chat_id == user.id)."""
+    if arg.isdigit() and 0 < int(arg) <= len(_last_chats) and int(arg) < 1000:
+        return _last_chats[int(arg) - 1]
+    if arg.lower() in ("anon", "аноним", "анон"):
+        if not CFG["anon_bot"]:
+            return None
+        arg = CFG["anon_bot"]
     try:
         ent = await tg(client.get_entity(int(arg) if arg.lstrip("-").isdigit() else arg))
-        return str(ent.id)
     except Exception:  # noqa: BLE001
         return None
+    return ent if isinstance(ent, User) else None
+
+
+async def _target(args: list[str], current: User | None, need_rest: bool) -> tuple[User | None, str, str]:
+    """Разобрать «[кто] остальное». → (пользователь, остальной текст, ошибка)."""
+    if args and _looks_like_target(args[0]) and (len(args) > 1 or not need_rest or current is None):
+        user = await resolve_chat(args[0])
+        return user, " ".join(args[1:]), "" if user else f"не нашёл {args[0]}"
+    if current is None:
+        return None, "", "кому? укажи @username / id / номер из chats, или сначала open"
+    return current, " ".join(args), ""
+
+
+def who_name(user: User) -> str:
+    if is_anon_bot(user):
+        return "анонимный чат"
+    return display_name(user) + (f" (@{user.username})" if user.username else "")
+
+
+def format_msg(m, name: str) -> str:
+    stamp = m.date.astimezone().strftime("%d.%m %H:%M")
+    if m.out:
+        body = media_history_label(m.chat_id, m.id) or describe(m)
+        arrow = "→ бот" if is_bot_msg(m.chat_id, m.id) else "✎ ты"
+    else:
+        body, arrow = describe(m), f"← {name}"
+    body = PHOTO_TAG_RE.sub(media_plain, body or "")
+    return f"[{stamp}] {arrow}: {body}"
+
+
+def kick_worker(chat_id: int, user: User) -> None:
+    if chat_id not in workers:
+        workers[chat_id] = asyncio.create_task(worker(chat_id, user))
+
+
+async def send_media_now(chat_id: int, user: User, it: dict) -> None:
+    anon = is_anon_bot(user)
+    name = ANON_NAME if anon else display_name(user)
+    try:
+        await _deliver_media(chat_id, it, name, state.get("anon_partner") if anon else None, force=True)
+    except Exception as exc:  # noqa: BLE001
+        media_sent_in(chat_id).pop(it["name"], None)
+        await notify(f"⚠️ не смог отправить {it['name']}: {exc}")
+
+
+async def run_command(line: str, current: User | None = None, console: bool = False) -> str:
+    """Выполнить команду (без префикса .ub). Возвращает текст ответа."""
+    parts = line.split()
+    cmd = (parts[0] if parts else "status").lower()
+    args = parts[1:]
+    aliases = {"тема": "tell", "скажи": "tell", "забудь": "forget", "напиши": "write", "?": "help",
+               "quit": "exit", "q": "exit", "h": "help", "ls": "chats"}
+    cmd = aliases.get(cmd, cmd)
+    if not console and any(c[0] == cmd and c[3] for c in COMMANDS):
+        return f"«{cmd}» работает только в ub (./ub в терминале)"
+    if cmd == "help":
+        return help_text(args[0].lower() if args else "", console)
+    if cmd == "status":
+        hints = ", ".join(str(c) for c in owner_hints) or "—"
+        return (f"{'⏸ пауза' if state['paused'] else '▶️ работает'}\n"
+                f"белый список: {', '.join(sorted(CFG['allow'])) or '—'}\n"
+                f"не-контакты: {'да' if CFG['allow_non_contacts'] else 'нет'}\n"
+                f"анонимный чат: {'@' + CFG['anon_bot'] if CFG['anon_bot'] else '—'}\n"
+                f"заглушены: {', '.join(state['muted']) or '—'}\n"
+                f"указания: {hints}\n"
+                f"медиа: {', '.join(sorted(MEDIA_SEND)) or 'выключено'}"
+                f"{' (сам не предлагает)' if MEDIA_SEND and not MEDIA_SELF else ''}\n"
+                f"думает сейчас: {', '.join(str(c) for c in worker_started) or '—'}")
+    if cmd == "chats":
+        n = int(args[0]) if args and args[0].isdigit() else 15
+        _last_chats.clear()
+        rows = []
+        async for d in client.iter_dialogs(limit=80):
+            u = d.entity
+            if not isinstance(u, User) or u.is_self or (u.bot and not is_anon_bot(u)):
+                continue
+            _last_chats.append(u)
+            last = d.message
+            preview = PHOTO_TAG_RE.sub(media_plain, describe(last) if last else "")
+            preview = " ".join(preview.split())[:50]
+            flags = ("🔇" if str(u.id) in state["muted"] else "") + ("📝" if u.id in owner_hints else "") \
+                + ("💭" if u.id in worker_started else "") + (f" ({d.unread_count})" if d.unread_count else "")
+            rows.append(f"{len(_last_chats):>2}. {who_name(u)}{flags} — {'→ ' if last and last.out else ''}{preview}")
+            if len(_last_chats) >= n:
+                break
+        return "\n".join(rows) or "чатов нет"
+    if cmd == "media":
+        items = load_media(set(MEDIA_KINDS))
+        return ("🖼 медиа (" + (", ".join(sorted(MEDIA_SEND)) or "бот сам не шлёт") + "):\n"
+                + ("\n".join(f"{n} — {MEDIA_KIND_RU[i['kind']]}, {i['when']}: {i['about']}"
+                             for n, i in items.items()) or f"пусто (папка {MEDIA_DIR})"))
+    if cmd in ("pause", "resume"):
+        state["paused"] = cmd == "pause"
+        save_state()
+        return "⏸ автоответы на паузе" if state["paused"] else "▶️ автоответы включены"
+    if cmd == "history":
+        rest, n = list(args), 20
+        # «history 50» в открытом чате или «history @x 50» — число в конце = сколько сообщений
+        if rest and rest[-1].isdigit() and len(rest[-1]) <= 3 and (len(rest) > 1 or current):
+            n = int(rest.pop())
+        user, _, err = await _target(rest, current, False)
+        if err:
+            return err
+        msgs = await tg_iter(client.iter_messages(user.id, limit=min(n, 200)))
+        name = display_name(user) if not is_anon_bot(user) else "он"
+        return f"── {who_name(user)} ──\n" + ("\n".join(format_msg(m, name) for m in reversed(msgs)) or "пусто")
+    if cmd in ("mute", "unmute", "forget"):
+        user, _, err = await _target(args, current, False)
+        if err:
+            return err
+        uid = str(user.id)
+        if cmd == "forget":
+            return (f"🗑 {who_name(user)}: указание отменено" if owner_hints.pop(user.id, None)
+                    else f"{who_name(user)}: указаний нет")
+        state["muted"] = sorted(set(state["muted"]) | {uid}) if cmd == "mute" else [x for x in state["muted"] if x != uid]
+        save_state()
+        return f"🔇 {who_name(user)} — больше не отвечаю" if cmd == "mute" else f"🔈 {who_name(user)} — снова отвечаю"
+    if cmd in ("tell", "write", "send"):
+        user, rest, err = await _target(args, current, True)
+        if err:
+            return err
+        if not rest.strip():
+            return f"а что {'сказать' if cmd != 'send' else 'отправить'}? help {cmd}"
+        rest = rest.strip()
+        if cmd == "tell":
+            owner_hints[user.id] = (rest, time.time())
+            busy = user.id in worker_started
+            kick_worker(user.id, user)
+            return (f"📝 {who_name(user)}: «{rest}»\n"
+                    + ("бот сейчас думает — переделает ответ с указанием" if busy else "напишу с учётом этого"))
+        if cmd == "write":
+            await tg(client.send_message(user.id, rest))
+            mins = int(CFG["takeover_min"])
+            return "✎ отправил от тебя" + (f" — бот уступит чат на {mins} мин" if mins > 0
+                                           else " (TAKEOVER_MINUTES=0 — бот не уступает чат)")
+        it = find_media(rest, set(MEDIA_KINDS))
+        if not it:
+            return f"нет медиа «{rest}» — список: media"
+        media_sent_in(user.id)[it["name"]] = "pending"
+        asyncio.create_task(send_media_now(user.id, user, it))
+        return f"📤 {who_name(user)}: отправляю {MEDIA_KIND_RU[it['kind']]} {it['name']}"
+    return f"не знаю команду «{cmd}» — help"
 
 
 async def on_command(event):
     text = (event.raw_text or "").strip()
     if not text.startswith(".ub"):
         return
-    parts = text.split()
-    cmd = parts[1] if len(parts) > 1 else "status"
-    if cmd == "pause":
-        state["paused"] = True
-        reply = "⏸ автоответы на паузе"
-    elif cmd == "resume":
-        state["paused"] = False
-        reply = "▶️ автоответы включены"
-    elif cmd in ("mute", "unmute") and len(parts) > 2:
-        uid = await resolve_id(parts[2])
-        if not uid:
-            reply = "не нашёл такого пользователя"
-        elif cmd == "mute":
-            state["muted"] = sorted(set(state["muted"]) | {uid})
-            reply = f"🔇 {parts[2]} — больше не отвечаю"
-        else:
-            state["muted"] = [x for x in state["muted"] if x != uid]
-            reply = f"🔈 {parts[2]} — снова отвечаю"
-    else:
-        reply = (
-            f"{'⏸ пауза' if state['paused'] else '▶️ работает'}\n"
-            f"белый список: {', '.join(sorted(CFG['allow'])) or '—'}\n"
-            f"не-контакты: {'да' if CFG['allow_non_contacts'] else 'нет'}\n"
-            f"заглушены: {', '.join(state['muted']) or '—'}\n"
-            "команды: .ub status | pause | resume | mute @user | unmute @user"
-        )
-    save_state()
-    await tg(event.reply(reply))
+    try:
+        reply = await run_command(text[3:].strip())
+    except Exception as exc:  # noqa: BLE001
+        reply = f"⚠️ {exc}"
+    await tg(event.reply(reply[:4000]))
+
+
+# ── управление из отдельной программы: ./ub (в другом терминале) ───────────
+# Бот слушает локальный сокет state/control.sock (только для твоего пользователя).
+# Протокол — JSON-строки: ub шлёт {"line": "команда"}, бот отвечает {"type": "result", ...};
+# сообщения открытого чата и лог бота приходят сами: {"type": "msg" | "log", ...}.
+import builtins  # noqa: E402
+
+CONTROL_SOCK = HERE / "state" / "control.sock"
+CONTROL_CONNS: list[dict] = []   # подключённые ub: {"writer", "chat": User | None, "logs": bool}
+_orig_print = builtins.print
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _conn_send(conn: dict, obj: dict) -> None:
+    try:
+        conn["writer"].write((json.dumps(obj, ensure_ascii=False) + "\n").encode())
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _tee_print(*args, **kwargs) -> None:
+    """print как раньше (в терминал run.sh) + копия в ub, у кого включён logs on."""
+    _orig_print(*args, **kwargs)
+    if not CONTROL_CONNS or kwargs.get("file") not in (None, sys.stdout, sys.stderr) or not _main_loop:
+        return
+    text = kwargs.get("sep", " ").join(map(str, args))
+    obj = {"type": "log", "text": text, "err": kwargs.get("file") is sys.stderr}
+    for conn in list(CONTROL_CONNS):
+        if conn["logs"]:
+            _main_loop.call_soon_threadsafe(_conn_send, conn, obj)
+
+
+def chat_label(user: User | None) -> str | None:
+    return who_name(user) if user else None
+
+
+async def on_watch(event):
+    """Новые сообщения чатов, открытых в ub (open), — туда вживую."""
+    conns = [c for c in CONTROL_CONNS if c["chat"] and c["chat"].id == event.chat_id]
+    if not conns:
+        return
+    if event.out:
+        await asyncio.sleep(1.5)  # чтобы remember_bot_msg успел пометить сообщение бота
+    for conn in conns:
+        u = conn["chat"]
+        if is_anon_bot(u) and not event.out and is_anon_system(event.message):
+            _conn_send(conn, {"type": "msg", "kind": "sys",
+                              "text": f"[анонимный чат] {(event.raw_text or '').strip()[:200]}"})
+            continue
+        line = format_msg(event.message, display_name(u) if not is_anon_bot(u) else "он")
+        kind = "me" if "✎ ты" in line else "bot" if "→ бот" in line else "in"
+        _conn_send(conn, {"type": "msg", "kind": kind, "text": line})
+
+
+async def control_exec(conn: dict, line: str) -> str:
+    parts = line.split()
+    cmd = parts[0].lower() if parts else ""
+    if cmd == "logs":
+        if len(parts) > 1 and parts[1].lower() in ("on", "off"):
+            conn["logs"] = parts[1].lower() == "on"
+        return f"лог бота здесь: {'показывается' if conn['logs'] else 'скрыт'}"
+    if cmd == "close":
+        conn["chat"] = None
+        return "чат закрыт"
+    if cmd == "open":
+        if len(parts) < 2:
+            return "кого открыть? open @username / id / номер из chats / anon"
+        user = await resolve_chat(parts[1])
+        if not user:
+            return f"не нашёл {parts[1]}"
+        conn["chat"] = user
+        return (await run_command("history 20", user, console=True)
+                + "\n(новые сообщения будут появляться здесь; tell/write/send — без @; close — закрыть)")
+    return await run_command(line, conn["chat"], console=True)
+
+
+async def control_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    conn = {"writer": writer, "chat": None, "logs": False}
+    CONTROL_CONNS.append(conn)
+    _conn_send(conn, {"type": "hello", "me": who_name(me) if me else "",
+                      "commands": [c[0] for c in COMMANDS]})
+    try:
+        while True:
+            raw = await reader.readline()
+            if not raw:
+                break
+            try:
+                line = str(json.loads(raw).get("line", "")).strip()
+                text = await control_exec(conn, line)
+            except Exception as exc:  # noqa: BLE001
+                text = f"⚠️ ошибка: {exc}"
+            _conn_send(conn, {"type": "result", "text": text, "chat": chat_label(conn["chat"])})
+            await writer.drain()
+    except (ConnectionError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        CONTROL_CONNS.remove(conn)
+        writer.close()
+
+
+async def start_control_server() -> None:
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
+    builtins.print = _tee_print
+    CONTROL_SOCK.unlink(missing_ok=True)  # второй копии бота быть не может (userbot.lock)
+    old = os.umask(0o177)  # сокет — только для твоего пользователя
+    try:
+        await asyncio.start_unix_server(control_client, path=str(CONTROL_SOCK))
+    finally:
+        os.umask(old)
+    client.add_event_handler(on_watch, events.NewMessage(func=lambda e: e.is_private))
+    print(f"[userbot] управление: ./ub в другом терминале ({CONTROL_SOCK.name})")
+
 
 
 async def catch_up(max_age_hours: float = 24) -> None:
@@ -3183,6 +3523,7 @@ async def main() -> None:
     asyncio.create_task(watchdog())
     await catch_up()
     asyncio.create_task(sync_all_contacts())
+    await start_control_server()
     await client.run_until_disconnected()
 
 
