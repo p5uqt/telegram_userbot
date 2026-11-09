@@ -1239,6 +1239,12 @@ def files_note() -> str:
     )
 
 
+# «держи», «лови», «скидываю фото», «вот мой кот» — обещание отправки в тексте ответа
+_SENDING_RE = re.compile(r"\b(держи|лови|скидываю|отправляю|высылаю|кидаю|щас скину|сейчас скину|"
+                         r"вот (фот\w*|видео|голосов\w*|кружо\w*|мо\w+ (кот\w*|кошк\w*|пес|пёс|собак\w*)))\b"
+                         r"[^,.!?\n]*", re.I)
+
+
 FILE_CREATE_RE = re.compile(
     r"\[\s*создать(?:\s+файл)?\s*:\s*([^\]\n]+?)\s*\]\s*\n?(.*?)\[\s*/\s*создать\s*\]", re.I | re.S)
 FILE_SEND_RE = re.compile(r"\[\s*отправить(?:\s+файл)?\s*:\s*([^\]\n]+?)\s*\]", re.I)
@@ -1324,14 +1330,13 @@ _MEDIA_WORDS = {
     "voice": r"голосов\w*|гс|войс\w*|голосом|голос|voice\w*|vm",
     "round": r"кружо\w*|кружк\w*|кругляш\w*|video ?note\w*|circle\w*",
 }
+# глагол просьбы — по корню, чтобы ловить и опечатки/формы: «скин», «скинула?», «отправишь», «покаж»
 _MEDIA_ASK_RE = re.compile(
-    r"\b(скинь\w*|скинешь|скиньте|кинь\w*|кинешь|покажи\w*|покажешь|показать|отправь\w*|отправишь|"
-    r"пришли\w*|пришлёшь|пришлешь|присылай|запиши\w*|запишешь|записать|сфоткай\w*|сфоткаешь|сними|"
-    r"снимешь|скидывай|хочу (увидеть|посмотреть|услышать|послушать)|"
-    r"(можно|дай|давай)\b[^.!?\n]{0,15}(посмотреть|глянуть|увидеть|послушать|услышать)|"
-    r"(а )?как ты выглядишь|send|show me|share|let me see|wanna see|can i see)\b", re.I)
-# «давай кружочек», «хочу фото», «жду голосовое» — вид медиа + слово-просьба
-_MEDIA_SOFT_ASK_RE = re.compile(r"\b(давай|хочу|можно|жду|ну|го|плиз|pls|please)\b|\?", re.I)
+    r"\b(скин\w*|скид\w*|кинь\w*|кинеш\w*|покаж\w*|показа\w*|отправ\w*|пришл\w*|присыл\w*|"
+    r"запиш\w*|записать|сфотк\w*|сними|снимешь|глян\w*|посмотреть|увидеть|услышать|послушать|"
+    r"как ты выглядишь|как выглядишь|send|show|share|see)", re.I)
+# «давай кружочек», «хочу фото», «жду голосовое», «фото кота?» — вид медиа + слово-просьба
+_MEDIA_SOFT_ASK_RE = re.compile(r"\b(давай|хочу|можно|жду|ну|го|плиз|pls|please|где)\b|\?", re.I)
 
 
 def media_requested(text: str) -> set[str] | None:
@@ -1339,10 +1344,28 @@ def media_requested(text: str) -> set[str] | None:
     «показать» без уточнения (подойдёт любое)."""
     kinds = {k for k, rx in _MEDIA_WORDS.items() if re.search(rf"\b(?:{rx})\b", text, re.I)}
     if not _MEDIA_ASK_RE.search(text) and not (kinds and _MEDIA_SOFT_ASK_RE.search(text)):
-        return None  # «есть фото?», «давай кружочек» — тоже просьба
+        return None
     if kinds == {"voice"} and re.search(r"кружо|кружк", text, re.I):
         kinds.add("round")
     return kinds
+
+
+def media_asked(history: list[str]) -> set[str] | None:
+    """Просьба в последних (до 4) его сообщениях — с контекстом: «скинь фотку» → «ну ты не скинула»
+    всё ещё та же просьба. Считаем только с момента, как ты последний раз что-то отправил."""
+    texts: list[str] = []
+    for t in reversed([x for x in map(_history_turn, history) if x]):
+        if t[0] == "assistant":
+            if t[1].startswith("[ты отправил"):
+                break  # на прошлую просьбу уже ответили медиа
+            continue
+        texts.append(t[1])
+        if len(texts) >= 4:
+            break
+    asked = [k for k in (media_requested(x) for x in texts) if k is not None]
+    if not asked:
+        return None
+    return set().union(*asked)
 
 
 MEDIA_TAG_RE = re.compile(r"\[\s*(?:медиа|media)\s*:\s*([^\]\n]+?)\s*\]", re.I)
@@ -1413,7 +1436,7 @@ def media_sent_in(chat_id: int) -> dict[str, str]:
 def media_status(chat_id: int) -> str:
     """Подсказка для конкретного чата: что из медиа уже ушло или ждёт отправки."""
     done = media_sent_in(chat_id)
-    sent = [n for n, st in done.items() if st == "sent"]
+    sent = [n for n, st in done.items() if st.startswith("sent")]
     wait = [n for n, st in done.items() if st == "pending"]
     parts = []
     if sent:
@@ -1588,7 +1611,7 @@ async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | 
         await notify(f"🖼 {name}: не смог отправить {it['name']}")
         return
     remember_bot_msg(chat_id, msg_id)
-    done[it["name"]] = "sent"
+    done[it["name"]] = f"sent:{msg_id}"   # id — чтобы потом проверить, не удалено ли
     state.setdefault("media_msgs", {})[f"{chat_id}:{msg_id}"] = _media_label(it)
     keys = list(state["media_msgs"])
     for k in keys[:-500]:
@@ -1599,6 +1622,24 @@ async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | 
     await notify(f"🖼 → {name}: {MEDIA_KIND_RU[it['kind']]} {it['name']}")
 
 
+async def media_still_there(chat_id: int, it: dict) -> bool:
+    """Отправленное медиа ещё в чате? (могли удалить — тогда «уже отправлено» неправда)."""
+    st = media_sent_in(chat_id).get(it["name"], "")
+    msg_id = int(st.split(":", 1)[1]) if st.startswith("sent:") else None
+    if msg_id is None:  # старая запись без id — ищем по подписи в media_msgs
+        label = _media_label(it)
+        ids = [int(k.split(":", 1)[1]) for k, v in state.get("media_msgs", {}).items()
+               if k.startswith(f"{chat_id}:") and v == label]
+        msg_id = ids[-1] if ids else None
+    if msg_id is None:
+        return False
+    try:
+        m = await tg(client.get_messages(chat_id, ids=msg_id))
+    except Exception:  # noqa: BLE001
+        return True  # не смогли проверить — считаем, что на месте (лучше не дублировать)
+    return bool(m)
+
+
 async def do_media_action(chat_id: int, ref: str, name: str, anon: bool = False, now: bool = False) -> None:
     it = find_media(ref, set(MEDIA_KINDS) if now else None)  # по твоему указанию — любые виды
     if not it:
@@ -1606,8 +1647,10 @@ async def do_media_action(chat_id: int, ref: str, name: str, anon: bool = False,
         await notify(f"🖼 {name}: модель хотела отправить «{ref}», такого нет")
         return
     done = media_sent_in(chat_id)
+    if done.get(it["name"], "").startswith("sent") and not await media_still_there(chat_id, it):
+        done.pop(it["name"], None)  # то сообщение удалили из чата — можно отправить снова
     if done.get(it["name"]):
-        print(f"[{name}] {it['name']} уже {'отправлено' if done[it['name']] == 'sent' else 'в очереди'} — не дублирую")
+        print(f"[{name}] {it['name']} уже {'в очереди' if done[it['name']] == 'pending' else 'отправлено'} — не дублирую")
         return
     anon_partner = state.get("anon_partner") if anon else None
     if it["when"] == "now" or now:  # now — ты сам попросил через .ub tell: без оттягивания
@@ -2801,22 +2844,48 @@ async def respond(chat_id: int, user: User) -> None:
             norm_reply(p) for p in _PART_SPLIT.split(reply) if norm_reply(p))
         del recent_parts[chat_id][:-20]  # помним ~20 последних кусочков своих реплик
     del recent_replies[chat_id][:-6]  # помним последние 6 своих реплик
-    if file_actions and not MEDIA_SELF and not hint_text and any(a[0] == "media" for a in file_actions):
-        asked = media_requested("\n".join(pending))
-        keep = []
+    if any(a[0] == "media" for a in file_actions):
+        asked = media_asked(history) if not MEDIA_SELF and not hint_text else set()
+        keep, why_drop = [], ""
         for a in file_actions:
-            it = find_media(a[1]) if a[0] == "media" else None
+            it = find_media(a[1], set(MEDIA_KINDS) if hint_text else None) if a[0] == "media" else None
+            if a[0] == "media" and it:
+                st = media_sent_in(chat_id).get(it["name"], "")
+                if st.startswith("sent") and not await media_still_there(chat_id, it):
+                    media_sent_in(chat_id).pop(it["name"], None)  # удалили из чата — шлём заново
+                    print(f"[{name}] {it['name']} было отправлено, но его удалили — отправлю снова")
+                    st = ""
+                if st:
+                    why_drop = why_drop or ("pending" if st == "pending" else "already")
+                    print(f"[{name}] {it['name']} уже {'в очереди' if st == 'pending' else 'есть в чате'} — не дублирую")
+                    continue
             if a[0] == "media" and (asked is None or (it and asked and it["kind"] not in asked)):
                 why = "не просили" if asked is None else f"просили {', '.join(sorted(asked))}"
                 print(f"[{name}] медиа «{a[1]}» не отправляю — {why} (MEDIA_SELF=0)")
+                why_drop = why_drop or "not_asked"
                 continue
             keep.append(a)
         if len(keep) < len(file_actions):
-            # «держи» / «лови» без файла — странно: убираем, а если ничего не осталось — отмазка
-            reply = re.sub(r"^\s*(держи|лови|вот|на|скидываю|отправляю|сейчас скину|щас скину)\b[\s,.!)]*",
-                           "", reply or "", flags=re.I).strip()
-            if not reply and not keep:
-                reply = random.choice(phrases("fallback_replies", history))
+            # текст наверняка «держи фото» — без файла это враньё: переписываем ответ без медиа
+            extra = {
+                "already": "Это ты уже отправлял ему раньше - оно есть выше в переписке. Не отправляй снова "
+                           "и не пиши, что отправляешь: скажи по-человечески, что уже скидывал выше.",
+                "pending": "Ты уже пообещал это отправить, оно скоро уйдёт само. Не пиши «держи» - скажи "
+                           "коротко, что щас, чуть позже скинешь.",
+            }.get(why_drop, "Сейчас ничего не отправляй: ни фото, ни видео, ни голосовое - и не пиши, что "
+                            "отправляешь или скинешь. Просто ответь на его сообщение обычным текстом.")
+            redo = pull(await run_harness(build_task(name, history, extra, note),
+                                          build_messages(name, history, extra, note)))
+            if state["paused"] or chat_id in manual_during:
+                return
+            redo = humanize(redo)
+            if redo and not service_tag(redo) and not _SENDING_RE.search(redo):
+                print(f"[{name}] переписал ответ без медиа: «{reply}» → «{redo}»")
+                reply = redo
+            else:
+                reply = _SENDING_RE.sub("", reply or "").strip(" ,.!") or random.choice(
+                    phrases("already_answered" if why_drop == "already" else "fallback_replies", history))
+            keep = [a for a in keep if a[0] != "media"]
         file_actions = keep
     key = f"{chat_id}:{state.get('anon_partner')}" if anon else str(chat_id)
     disclosure = CFG["anon_disclosure"] if anon else CFG["disclosure"]
@@ -2869,6 +2938,8 @@ async def worker(chat_id: int, user: User) -> None:
                 await asyncio.sleep(0.5)
             if state["paused"]:
                 return
+            while RESTART["pending"]:  # ждём перезапуска — новый ответ не начинаем (ответит после)
+                await asyncio.sleep(1)
             manual_during.discard(chat_id)
             started = time.time()  # всё, что пришло до этого момента, попадёт в ответ
             try:
@@ -3084,6 +3155,7 @@ COMMANDS = [
     ("write", "[кто] <текст>", "написать сообщение от себя (бот уступит тебе на TAKEOVER_MINUTES)", False),
     ("send", "[кто] <файл>", "сразу отправить медиа из media/ без модели", False),
     ("media", "", "список медиа с описаниями", False),
+    ("restart", "[cancel]", "перезапустить бота, как только он закончит думать (для personality.toml, .env, кода)", False),
     ("pause", "", "поставить все автоответы на паузу", False),
     ("resume", "", "снять с паузы", False),
     ("mute", "[кто]", "не отвечать этому человеку", False),
@@ -3099,6 +3171,10 @@ HELP_DETAILS = {
     "send": "Пример: send @masha cat.jpg   (имя файла или путь от media/, список — media)",
     "write": "Пример: write привет, это я сам\nСообщение уходит от тебя, как будто ты написал с телефона: "
              "бот это заметит и замолчит в этом чате на TAKEOVER_MINUTES.",
+    "restart": "Ждёт, пока бот допишет все ответы, которые сейчас генерирует; новые в это время не "
+               "начинает. Потом перезапускается (нужен ./run.sh или systemd), ub переподключится сам.\n"
+               "persona.md и media/media.toml перезапуск НЕ нужен — они перечитываются на каждый ответ.\n"
+               "restart cancel — отменить, пока не перезапустился.",
     "open": "Пример: open @masha   или   open 3   (номер из chats)\nПосле open команды tell/write/send/... "
             "можно писать без <кто>, а в чате видно: ← он, → бот, ✎ ты сам.",
 }
@@ -3166,6 +3242,28 @@ def format_msg(m, name: str) -> str:
     return f"[{stamp}] {arrow}: {body}"
 
 
+RESTART = {"pending": False, "exit": False}
+RESTART_CODE = 75   # run.sh: перезапуск по команде — без 5-секундной паузы
+
+
+async def restart_when_idle() -> None:
+    """Ждём, пока ни один ответ не «думает», и выходим — run.sh / systemd поднимут бота заново."""
+    while RESTART["pending"]:
+        if not worker_started:
+            print("[userbot] перезапуск по команде restart")
+            save_state()
+            RESTART["exit"] = True
+            # сначала закрываем управление — чтобы ub не подключился к уходящему процессу
+            if _control_server:
+                _control_server.close()
+            CONTROL_SOCK.unlink(missing_ok=True)
+            for conn in list(CONTROL_CONNS):
+                conn["writer"].close()
+            await client.disconnect()
+            return
+        await asyncio.sleep(0.5)
+
+
 def kick_worker(chat_id: int, user: User) -> None:
     if chat_id not in workers:
         workers[chat_id] = asyncio.create_task(worker(chat_id, user))
@@ -3227,6 +3325,21 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         return ("🖼 медиа (" + (", ".join(sorted(MEDIA_SEND)) or "бот сам не шлёт") + "):\n"
                 + ("\n".join(f"{n} — {MEDIA_KIND_RU[i['kind']]}, {i['when']}: {i['about']}"
                              for n, i in items.items()) or f"пусто (папка {MEDIA_DIR})"))
+    if cmd == "restart":
+        if args and args[0].lower() in ("cancel", "отмена"):
+            if not RESTART["pending"]:
+                return "перезапуск и так не запланирован"
+            RESTART["pending"] = False
+            return "↩️ перезапуск отменён"
+        if RESTART["pending"]:
+            return "перезапуск уже ждёт — бот ещё думает: " + (", ".join(map(str, worker_started)) or "—")
+        RESTART["pending"] = True
+        asyncio.create_task(restart_when_idle())
+        lost = f"\n⚠️ отложенные медиа ({len(_media_tasks)}) не уйдут" if _media_tasks else ""
+        if worker_started:
+            return (f"🔄 перезапущусь, как только бот допишет ответ (думает: "
+                    f"{', '.join(map(str, worker_started))}); новые ответы пока не начинаю{lost}")
+        return f"🔄 перезапускаюсь…{lost}"
     if cmd in ("pause", "resume"):
         state["paused"] = cmd == "pause"
         save_state()
@@ -3297,6 +3410,7 @@ async def on_command(event):
 # сообщения открытого чата и лог бота приходят сами: {"type": "msg" | "log", ...}.
 CONTROL_SOCK = HERE / "state" / "control.sock"
 CONTROL_CONNS: list[dict] = []   # подключённые ub: {"writer", "chat": User | None}
+_control_server: asyncio.AbstractServer | None = None
 
 
 def _conn_send(conn: dict, obj: dict) -> None:
@@ -3375,7 +3489,8 @@ async def start_control_server() -> None:
     CONTROL_SOCK.unlink(missing_ok=True)  # второй копии бота быть не может (userbot.lock)
     old = os.umask(0o177)  # сокет — только для твоего пользователя
     try:
-        await asyncio.start_unix_server(control_client, path=str(CONTROL_SOCK))
+        global _control_server
+        _control_server = await asyncio.start_unix_server(control_client, path=str(CONTROL_SOCK))
     finally:
         os.umask(old)
     client.add_event_handler(on_watch, events.NewMessage(func=lambda e: e.is_private))
@@ -3513,6 +3628,8 @@ async def main() -> None:
     asyncio.create_task(sync_all_contacts())
     await start_control_server()
     await client.run_until_disconnected()
+    if RESTART["exit"]:
+        sys.exit(RESTART_CODE)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,10 @@ bot_loop() {
     while true; do
         .venv/bin/python userbot.py
         code=$?
+        if [ "$code" -eq 75 ]; then   # команда restart из ub — сразу
+            echo "[run] перезапуск по команде restart" >&2
+            continue
+        fi
         echo "[run] userbot завершился (код $code), перезапуск через 5 с..." >&2
         sleep 5
     done
