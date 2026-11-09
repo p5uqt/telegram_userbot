@@ -137,6 +137,9 @@ CFG = {
     "anon_bot": os.environ.get("ANON_BOT", "").strip().lstrip("@").lower(),
     "auto_next": os.environ.get("AUTO_NEXT", "1") == "1",
     "anon_max_per_hour": int(env_float("ANON_MAX_REPLIES_PER_HOUR", 60)),
+    # опечатки «как с телефона»: доля ответов с опечаткой и доля исправлений «*слово»
+    "typo_chance": env_float("TYPO_CHANCE", 0.06),
+    "typo_fix_chance": env_float("TYPO_FIX_CHANCE", 0.35),
     # пусто = в анонимном чате не предупреждать (по умолчанию)
     "anon_disclosure": os.environ.get("ANON_DISCLOSURE_TEXT", "").strip(),
 }
@@ -2395,7 +2398,7 @@ _TYPO_NEIGHBORS = {
 def add_typo(text: str) -> tuple[str, str | None]:
     """Иногда (редко) делаем опечатку, как при наборе с телефона.
     Возвращает (текст, исправление «*слово» или None)."""
-    if random.random() > 0.06:
+    if random.random() >= CFG["typo_chance"]:
         return text, None
     words = [m for m in re.finditer(r"[а-яё]{5,}", text)]
     if not words:
@@ -2411,7 +2414,7 @@ def add_typo(text: str) -> tuple[str, str | None]:
         return text, None
     fixed = text[:m.start()] + typo + text[m.end():]
     # чаще всего мелкую опечатку не исправляют
-    return fixed, ("*" + w if random.random() < 0.35 else None)
+    return fixed, ("*" + w if random.random() < CFG["typo_fix_chance"] else None)
 
 
 _FEM_ADJ = {
