@@ -4,12 +4,14 @@ state/
 *.session
 *.session-journal
 persona.md
+personality.toml
 
 # окружение и мусор
 .venv/
 __pycache__/
 *.pyc
 sandbox/
+media/
 
 # личные инструменты, не часть проекта
 coder_bot.py
