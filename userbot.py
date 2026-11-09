@@ -3073,9 +3073,6 @@ COMMANDS = [
     ("resume", "", "снять с паузы", False),
     ("mute", "[кто]", "не отвечать этому человеку", False),
     ("unmute", "[кто]", "снова отвечать", False),
-    ("logs", "on|off", "показывать здесь лог бота (по умолчанию off)", True),
-    ("clear", "", "очистить экран", True),
-    ("exit", "", "выйти из ub (бот продолжает работать; Ctrl+D — то же)", True),
 ]
 HELP_DETAILS = {
     "кто": "<кто> — @username, числовой id, номер из списка chats или anon (анонимный чат). "
@@ -3089,8 +3086,6 @@ HELP_DETAILS = {
              "бот это заметит и замолчит в этом чате на TAKEOVER_MINUTES.",
     "open": "Пример: open @masha   или   open 3   (номер из chats)\nПосле open команды tell/write/send/... "
             "можно писать без <кто>, а в чате видно: ← он, → бот, ✎ ты сам.",
-    "logs": "logs on — показывать в ub всё, что бот пишет в свой терминал (run.sh). "
-            "logs off — только открытый чат и ответы на команды.",
 }
 _last_chats: list[User] = []   # номера для «open 3»
 
@@ -3285,12 +3280,8 @@ async def on_command(event):
 # Бот слушает локальный сокет state/control.sock (только для твоего пользователя).
 # Протокол — JSON-строки: ub шлёт {"line": "команда"}, бот отвечает {"type": "result", ...};
 # сообщения открытого чата и лог бота приходят сами: {"type": "msg" | "log", ...}.
-import builtins  # noqa: E402
-
 CONTROL_SOCK = HERE / "state" / "control.sock"
-CONTROL_CONNS: list[dict] = []   # подключённые ub: {"writer", "chat": User | None, "logs": bool}
-_orig_print = builtins.print
-_main_loop: asyncio.AbstractEventLoop | None = None
+CONTROL_CONNS: list[dict] = []   # подключённые ub: {"writer", "chat": User | None}
 
 
 def _conn_send(conn: dict, obj: dict) -> None:
@@ -3298,18 +3289,6 @@ def _conn_send(conn: dict, obj: dict) -> None:
         conn["writer"].write((json.dumps(obj, ensure_ascii=False) + "\n").encode())
     except Exception:  # noqa: BLE001
         pass
-
-
-def _tee_print(*args, **kwargs) -> None:
-    """print как раньше (в терминал run.sh) + копия в ub, у кого включён logs on."""
-    _orig_print(*args, **kwargs)
-    if not CONTROL_CONNS or kwargs.get("file") not in (None, sys.stdout, sys.stderr) or not _main_loop:
-        return
-    text = kwargs.get("sep", " ").join(map(str, args))
-    obj = {"type": "log", "text": text, "err": kwargs.get("file") is sys.stderr}
-    for conn in list(CONTROL_CONNS):
-        if conn["logs"]:
-            _main_loop.call_soon_threadsafe(_conn_send, conn, obj)
 
 
 def chat_label(user: User | None) -> str | None:
@@ -3337,10 +3316,6 @@ async def on_watch(event):
 async def control_exec(conn: dict, line: str) -> str:
     parts = line.split()
     cmd = parts[0].lower() if parts else ""
-    if cmd == "logs":
-        if len(parts) > 1 and parts[1].lower() in ("on", "off"):
-            conn["logs"] = parts[1].lower() == "on"
-        return f"лог бота здесь: {'показывается' if conn['logs'] else 'скрыт'}"
     if cmd == "close":
         conn["chat"] = None
         return "чат закрыт"
@@ -3357,7 +3332,7 @@ async def control_exec(conn: dict, line: str) -> str:
 
 
 async def control_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    conn = {"writer": writer, "chat": None, "logs": False}
+    conn = {"writer": writer, "chat": None}
     CONTROL_CONNS.append(conn)
     _conn_send(conn, {"type": "hello", "me": who_name(me) if me else "",
                       "commands": [c[0] for c in COMMANDS]})
@@ -3371,7 +3346,8 @@ async def control_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
                 text = await control_exec(conn, line)
             except Exception as exc:  # noqa: BLE001
                 text = f"⚠️ ошибка: {exc}"
-            _conn_send(conn, {"type": "result", "text": text, "chat": chat_label(conn["chat"])})
+            _conn_send(conn, {"type": "result", "text": text, "chat": chat_label(conn["chat"]),
+                              "chat_id": conn["chat"].id if conn["chat"] else None})
             await writer.drain()
     except (ConnectionError, asyncio.IncompleteReadError):
         pass
@@ -3381,9 +3357,6 @@ async def control_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
 
 
 async def start_control_server() -> None:
-    global _main_loop
-    _main_loop = asyncio.get_running_loop()
-    builtins.print = _tee_print
     CONTROL_SOCK.unlink(missing_ok=True)  # второй копии бота быть не может (userbot.lock)
     old = os.umask(0o177)  # сокет — только для твоего пользователя
     try:
@@ -3391,7 +3364,7 @@ async def start_control_server() -> None:
     finally:
         os.umask(old)
     client.add_event_handler(on_watch, events.NewMessage(func=lambda e: e.is_private))
-    print(f"[userbot] управление: ./ub в другом терминале ({CONTROL_SOCK.name})")
+    print(f"[userbot] управление: ub ({CONTROL_SOCK.name})")
 
 
 

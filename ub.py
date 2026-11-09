@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
-"""ub — управление запущенным userbot из отдельного терминала.
+"""ub — управление userbot.
 
-Бот (./run.sh) должен быть запущен: ub подключается к нему через state/control.sock.
-Запуск: ./ub          интерактивно (help — список команд)
-        ./ub status   одна команда и выход
+./run.sh   запускает бота в фоне и сразу открывает ub (exit — остановить бота).
+./ub       подключиться к уже запущенному боту из другого терминала (exit — только выйти).
+./ub status   одна команда и выход.
 """
 import json
 import os
 import socket
 import sys
 import threading
+import time
 from pathlib import Path
 
-SOCK = Path(__file__).resolve().parent / "state" / "control.sock"
+HERE = Path(__file__).resolve().parent
+SOCK = HERE / "state" / "control.sock"
+LOG = HERE / "state" / "userbot.log"
+MAIN = "--main" in sys.argv          # запущен из run.sh: exit останавливает бота
+ARGS = [a for a in sys.argv[1:] if a != "--main"]
 TTY = sys.stdout.isatty()
 C = {"in": "\033[36m", "bot": "\033[32m", "me": "\033[33m", "sys": "\033[2m", "log": "\033[2m",
      "err": "\033[31m", "off": "\033[0m"} if TTY else dict.fromkeys(
     ("in", "bot", "me", "sys", "log", "err", "off"), "")
-LOCAL_HELP = "\n\nВ ub: exit / Ctrl+D — выйти (бот работает дальше), clear — очистить экран, ↑/↓ — история, Tab — дополнение."
+LOCAL_HELP = (
+    "\n\nВ ub:\n"
+    "  logs [n]                     режим просмотра лога бота (последние n строк + новые), Ctrl+C — назад\n"
+    "  clear                        очистить экран\n"
+    + ("  exit                         остановить бота и выйти (Ctrl+D — то же)\n" if MAIN else
+       "  exit                         выйти из ub, бот продолжит работать (Ctrl+D — то же)\n")
+    + "↑/↓ — история команд, Tab — дополнение, Ctrl+C — стереть строку")
 
-state = {"chat": None, "reading": False, "commands": []}
+state = {"chat": None, "chat_id": None, "reading": False, "commands": ["help"], "sock": None,
+         "skip": 0, "quit": False}
 result_ready = threading.Event()
 result_text: list[str] = []
 print_lock = threading.Lock()
@@ -40,31 +52,81 @@ def show(text: str) -> None:
         sys.stdout.flush()
 
 
-def reader(f) -> None:
-    for raw in f:
+def connect(wait: float, quiet: bool = False) -> socket.socket | None:
+    """Подключиться к боту; wait — сколько секунд ждать, пока он поднимется."""
+    deadline, said = time.time() + wait, False
+    while True:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            msg = json.loads(raw)
-        except ValueError:
-            continue
-        kind = msg.get("type")
-        if kind == "hello":
-            state["commands"] = msg.get("commands", [])
-            result_ready.set()
-        elif kind == "result":
-            state["chat"] = msg.get("chat")
-            result_text[:] = [msg.get("text", "")]
-            result_ready.set()
-        elif kind == "msg":
-            show(C.get(msg.get("kind"), "") + msg.get("text", "") + C["off"])
-        elif kind == "log":
-            show((C["err"] if msg.get("err") else C["log"]) + msg.get("text", "") + C["off"])
-    show(C["err"] + "соединение с ботом закрыто (бот остановлен или перезапускается)" + C["off"])
-    os._exit(1)
+            s.connect(str(SOCK))
+            return s
+        except OSError:
+            s.close()
+        if time.time() >= deadline or state["quit"]:
+            return None
+        if not said and wait > 3 and not quiet:
+            print(f"{C['sys']}жду, пока бот запустится… (logs — посмотреть, что он пишет){C['off']}")
+            said = True
+        time.sleep(0.5)
 
 
-def request(sock: socket.socket, line: str) -> str:
+def send(line: str) -> None:
+    state["sock"].sendall((json.dumps({"line": line}, ensure_ascii=False) + "\n").encode())
+
+
+def handle(raw: str) -> None:
+    try:
+        msg = json.loads(raw)
+    except ValueError:
+        return
+    kind = msg.get("type")
+    if kind == "hello":
+        state["commands"] = msg.get("commands", []) + ["logs", "clear", "exit"]
+    elif kind == "result":
+        if state["skip"]:  # ответ на служебный open после переподключения
+            state["skip"] -= 1
+            return
+        state["chat"], state["chat_id"] = msg.get("chat"), msg.get("chat_id")
+        result_text[:] = [msg.get("text", "")]
+        result_ready.set()
+    elif kind == "msg":
+        show(C.get(msg.get("kind"), "") + msg.get("text", "") + C["off"])
+
+
+def reader() -> None:
+    while not state["quit"]:
+        try:
+            for raw in state["sock"].makefile("r", encoding="utf-8"):
+                handle(raw)
+        except OSError:
+            pass  # бот упал посреди соединения — как обычный обрыв
+        if state["quit"]:
+            return
+        # бот перезапускается (watchdog / run.sh) — ждём и подключаемся заново
+        state["skip"] = 0
+        result_text[:] = ["соединение с ботом потеряно"]
+        result_ready.set()
+        show(C["err"] + "бот перезапускается — переподключаюсь…" + C["off"])
+        s = connect(120, quiet=True)
+        if not s:
+            show(C["err"] + "бот так и не поднялся (logs — посмотреть почему)" + C["off"])
+            while not state["quit"] and not (s := connect(60, quiet=True)):
+                pass
+            if not s:
+                return
+        state["sock"] = s
+        if state["chat_id"]:
+            state["skip"] += 1
+            send(f"open {state['chat_id']}")
+        show(C["sys"] + "снова подключён" + C["off"])
+
+
+def request(line: str) -> str:
     result_ready.clear()
-    sock.sendall((json.dumps({"line": line}, ensure_ascii=False) + "\n").encode())
+    try:
+        send(line)
+    except OSError:
+        return "бот сейчас недоступен (перезапускается?) — попробуй через пару секунд"
     if not result_ready.wait(180):
         return "бот не ответил за 3 минуты"
     return result_text[0] if result_text else ""
@@ -79,17 +141,43 @@ def colorize(text: str) -> str:
     return "\n".join(out)
 
 
-def main() -> None:
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+def log_mode(n: int) -> None:
+    """Как раньше в ./run.sh: лог бота вживую. Ctrl+C — обратно в ub."""
+    if not LOG.exists():
+        print(f"лога нет ({LOG}) — бот запущен не через ./run.sh?")
+        return
+    print(f"{C['sys']}── лог бота ({LOG.name}), Ctrl+C — назад в ub ──{C['off']}")
     try:
-        sock.connect(str(SOCK))
-    except OSError:
-        sys.exit("бот не запущен (или старая версия без управления): сначала ./run.sh")
-    threading.Thread(target=reader, args=(sock.makefile("r", encoding="utf-8"),), daemon=True).start()
-    result_ready.wait(10)
+        with open(LOG, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+            sys.stdout.write("".join(lines[-n:]))
+            sys.stdout.flush()
+            while True:
+                line = f.readline()
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    if LOG.exists() and LOG.stat().st_size < f.tell():  # лог обрезали/сменили
+                        f.seek(0)
+                    time.sleep(0.2)
+    except KeyboardInterrupt:
+        print(f"\n{C['sys']}── назад в ub ──{C['off']}")
 
-    if len(sys.argv) > 1:  # ./ub status — одна команда
-        print(colorize(request(sock, " ".join(sys.argv[1:]))))
+
+def main() -> None:
+    s = connect(90 if MAIN else 0)
+    if not s:
+        if MAIN:
+            print("бот не запустился за 90 с — смотри state/userbot.log")
+            log_mode(40)
+        sys.exit("бот не запущен: сначала ./run.sh")
+    state["sock"] = s
+    threading.Thread(target=reader, daemon=True).start()
+
+    if ARGS:  # ./ub status — одна команда
+        time.sleep(0.2)
+        print(colorize(request(" ".join(ARGS))))
         return
 
     import readline
@@ -98,18 +186,21 @@ def main() -> None:
         readline.read_history_file(hist)
     except OSError:
         pass
-    names = state["commands"] or ["help"]
-    readline.set_completer(lambda text, i: ([n + " " for n in names if n.startswith(text)] + [None])[i]
-                           if readline.get_begidx() == 0 else None)
+    readline.set_completer(lambda text, i: ([n + " " for n in state["commands"] if n.startswith(text)]
+                                            + [None])[i] if readline.get_begidx() == 0 else None)
     readline.parse_and_bind("tab: complete")
-    print(f"{C['sys']}подключён к боту. help — команды, Ctrl+D — выйти{C['off']}")
+    print(f"{C['sys']}бот работает. help — команды, logs — лог бота, "
+          f"{'exit — остановить бота' if MAIN else 'exit — выйти (бот продолжит работать)'}{C['off']}")
     while True:
         try:
             state["reading"] = True
             line = input(prompt()).strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print()
             break
+        except KeyboardInterrupt:
+            print()  # как в обычном терминале: Ctrl+C стирает строку, выход — exit / Ctrl+D
+            continue
         finally:
             state["reading"] = False
         if not line:
@@ -118,17 +209,24 @@ def main() -> None:
             readline.write_history_file(hist)
         except OSError:
             pass
-        cmd = line.split()[0].lower()
+        parts = line.split()
+        cmd = parts[0].lower()
         if cmd in ("exit", "quit", "q"):
             break
         if cmd == "clear":
             print("\033[2J\033[H", end="")
             continue
-        text = request(sock, line)
-        if cmd in ("help", "h", "?") and len(line.split()) == 1:
+        if cmd == "logs":
+            log_mode(int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 40)
+            continue
+        text = request(line)
+        if cmd in ("help", "h", "?") and len(parts) == 1:
             text += LOCAL_HELP
         with print_lock:
             print(colorize(text))
+    state["quit"] = True
+    if MAIN:
+        print("останавливаю бота…")
 
 
 if __name__ == "__main__":
