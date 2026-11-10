@@ -136,6 +136,9 @@ CFG = {
     # Anonymous-chat mode: answer ONLY inside this bot (e.g. AnonRuBot)
     "anon_bot": os.environ.get("ANON_BOT", "").strip().lstrip("@").lower(),
     "auto_next": os.environ.get("AUTO_NEXT", "1") == "1",
+    # анонимный чат: собеседник молчит столько минут после нашего сообщения (или с начала
+    # диалога, если никто ничего не написал) — /next. 0 = выключено. Только для ANON_BOT.
+    "anon_idle_min": env_float("ANON_IDLE_MINUTES", 6),
     "anon_max_per_hour": int(env_float("ANON_MAX_REPLIES_PER_HOUR", 60)),
     # входящие звонки: ignore — не трогать (звонок идёт как обычно); decline — сбросить;
     # decline_text — сбросить и написать, что сейчас не может говорить
@@ -3505,6 +3508,43 @@ async def watchdog() -> None:
 
 
 _searching = False
+# анонимный чат: когда нашёлся собеседник / он последний раз писал / мы писали / ты писал сам
+anon_ts = {"found": 0.0, "in": 0.0, "out": 0.0, "manual": 0.0}
+
+
+def anon_touch(kind: str) -> None:
+    if kind == "found":
+        anon_ts.update({"in": 0.0, "out": 0.0, "manual": 0.0})
+    anon_ts[kind] = time.time()
+
+
+async def anon_idle_watch() -> None:
+    """Собеседник в анонимке подозрительно долго молчит — скипаем (/next).
+
+    Работает ТОЛЬКО для чата ANON_BOT: обычные личные чаты сюда не попадают никогда.
+    Не скипаем, если собеседник написал последним (ответ за нами), пока бот пишет ответ,
+    на паузе, или если ты сам недавно писал в анонимку.
+    """
+    while True:
+        await asyncio.sleep(30)
+        idle = CFG["anon_idle_min"] * 60
+        chat_id = ANON_CHAT_ID
+        if idle <= 0 or chat_id is None or not CFG["anon_bot"]:
+            continue
+        if state["paused"] or not state.get("anon_active") or chat_id in workers:
+            continue
+        now = time.time()
+        if now - anon_ts["manual"] < max(idle, CFG["anon_takeover_min"] * 60):
+            continue  # ты сам ведёшь диалог — не мешаем
+        since = max(anon_ts["found"], anon_ts["out"])
+        if not since or anon_ts["in"] > since:
+            continue  # собеседник написал последним — ответ за нами, а не он молчит
+        if now - since < idle:
+            continue
+        try:
+            await anon_next(chat_id, f"молчит {int((now - since) // 60)} мин")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[anon] idle skip error: {exc}", file=sys.stderr)
 
 
 async def anon_next(chat_id: int, reason: str, farewell: str | None = None) -> None:
@@ -3560,6 +3600,7 @@ async def on_incoming(event):
             state["anon_gender"] = None
             recent_replies.pop(chat_id, None)  # новый собеседник — забываем старые реплики
             recent_parts.pop(chat_id, None)  # и кусочки («привет, м» иначе вырежется как «повтор»)
+            anon_touch("found")
             print("[anon] новый собеседник")
         elif ANON_END_RE.search(text) or ANON_IDLE_RE.search(text):
             ended = bool(ANON_END_RE.search(text)) and state.get("anon_active")
@@ -3579,6 +3620,8 @@ async def on_incoming(event):
     if incoming:
         print(f"[{chat_id}] ← {incoming[:200]}")
     last_incoming[chat_id] = time.time()
+    if ANON_CHAT_ID is not None and chat_id == ANON_CHAT_ID:
+        anon_touch("in")
     if chat_id not in workers:
         workers[chat_id] = asyncio.create_task(worker(chat_id, user))
 
@@ -3650,7 +3693,12 @@ async def on_outgoing(event):
         if (event.raw_text or "").strip().startswith("/"):
             return  # /search, /next, /stop — служебные, не «ты сам влез в диалог»
     await asyncio.sleep(1)  # let remember_bot_msg run for our own sends
+    is_anon = ANON_CHAT_ID is not None and chat_id == ANON_CHAT_ID
+    if is_anon:
+        anon_touch("out")
     if not is_bot_msg(chat_id, event.id):
+        if is_anon:
+            anon_touch("manual")
         manual_during.add(chat_id)
         if not (ANON_CHAT_ID is not None and chat_id == ANON_CHAT_ID):
             schedule_contact_sync(chat_id)
@@ -4163,6 +4211,7 @@ async def catch_up(max_age_hours: float = 24) -> None:
                 continue
             if ANON_FOUND_RE.search(m.raw_text or ""):
                 state["anon_partner"], state["anon_active"] = m.id, True
+                anon_touch("found")  # после рестарта даём собеседнику полный срок заново
             break
         save_state()
         print(f"[anon] режим анонимного чата @{CFG['anon_bot']}, диалог {'идёт' if state['anon_active'] else 'не идёт'}")
@@ -4290,6 +4339,8 @@ async def main() -> None:
         print("[userbot] внимание: белый список пуст — отвечать некому")
     spawn(preload_whisper())
     spawn(watchdog())
+    if CFG["anon_bot"]:
+        spawn(anon_idle_watch())
     await catch_up()
     spawn(sync_all_contacts())
     await start_control_server()
