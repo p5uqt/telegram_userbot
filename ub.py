@@ -27,7 +27,8 @@ LOCAL_HELP = (
     "  clear                        очистить экран\n"
     + ("  exit                         остановить бота и выйти (Ctrl+D — то же)\n" if MAIN else
        "  exit                         выйти из ub, бот продолжит работать (Ctrl+D — то же)\n")
-    + "↑/↓ — история команд, Tab — дополнение, Ctrl+C — стереть строку")
+    + "↑/↓ — история команд, Tab — дополнение, Ctrl+C — стереть строку, "
+      "а в открытом чате с пустой строкой — закрыть чат (как close)")
 
 state = {"chat": None, "chat_id": None, "reading": False, "commands": ["help"], "sock": None,
          "skip": 0, "quit": False}
@@ -198,7 +199,13 @@ def main() -> None:
             print()
             break
         except KeyboardInterrupt:
-            print()  # как в обычном терминале: Ctrl+C стирает строку, выход — exit / Ctrl+D
+            # набранное стирается; в открытом чате с пустой строкой Ctrl+C закрывает чат (назад в ub>)
+            typed = readline.get_line_buffer().strip()
+            print()
+            if state["chat"] and not typed:
+                state["reading"] = False
+                with print_lock:
+                    print(f"{C['sys']}{request('close')}{C['off']}")
             continue
         finally:
             state["reading"] = False
