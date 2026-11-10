@@ -2811,6 +2811,26 @@ def _smiley_parens(text: str) -> list[int]:
     return pos
 
 
+# тёплые моменты: тут «)» уместна всегда, даже если недавно уже была
+_WARM_REPLY_RE = re.compile(
+    r"\b(?:спокойной|споки|сладких снов|доброй ночи|добрых снов|до завтра|до связи|пока\b|давай,? пока|"
+    r"привет\w*|доброе утро|добрый (?:день|вечер)|спасибо\w*|спс\b|пасиб\w*|и тебе|взаимно|"
+    r"good ?night|gn\b|sweet dreams|bye+|see (?:you|ya)|thanks|thank you|thx|ty\b|you too)", re.I)
+_WARM_THEIRS_RE = re.compile("[\u2764\u2665\U0001F493-\U0001F49F\U0001F9E1\U0001F90D\U0001F90E\U0001FA75-\U0001FA77"
+                             "\U0001F60D\U0001F618\U0001F970\U0001F917\U0001F48B]|<3")
+
+
+def _warm_moment(reply: str, history: list[str]) -> bool:
+    if _WARM_REPLY_RE.search(reply):
+        return True
+    for t in filter(None, map(_history_turn, reversed(history))):
+        if t[0] != "user":
+            break  # смотрим только его последнюю пачку сообщений
+        if _WARM_THEIRS_RE.search(t[1]):
+            return True
+    return False
+
+
 SMILEY_GAP = int(env_float("SMILEY_GAP", 4))  # после «)» столько своих сообщений подряд без скобки
 
 
@@ -2823,6 +2843,8 @@ def ration_smileys(reply: str, history: list[str]) -> str:
     mine = [t[1] for t in map(_history_turn, history) if t and t[0] == "assistant"]
     recent = mine[-SMILEY_GAP:] if SMILEY_GAP > 0 else []
     keep = None if any(_smiley_parens(x) for x in recent) else pos[0]
+    if keep is None and _warm_moment(reply, history):
+        keep = pos[0]  # прощание, приветствие, «спасибо», сердечко от него — тут скобка к месту
     out, last = [], 0
     for i in pos:
         if i == keep:
