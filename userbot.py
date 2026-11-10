@@ -2517,6 +2517,38 @@ def memory_view(user: User, data: dict) -> str:
             f"из переписки:\n{prof}")
 
 
+def contact_info(uid: int) -> str:
+    """Команда info: шапка state/contacts/<id>.md — кто это, что о нём известно, сколько переписки."""
+    path = contact_path(uid)
+    try:
+        title = path.read_text(encoding="utf-8").split("\n", 1)[0].lstrip("# ").strip()
+    except OSError:
+        return ""
+    data = load_contact(uid)
+    prof = data["profile"] if data["profile"] and data["profile"] != "(пока ничего)" else "(пусто)"
+    log = data["log"]
+    span = (f"{len(log)} сообщ., {log[0][1:15]} — {log[-1][1:15]}" if log and log[0].startswith("[")
+            else f"{len(log)} сообщ.")
+    return (f"── {title} ──\nфайл: state/contacts/{path.name}\nпереписка: {span}\n\n"
+            f"от тебя:\n{data['owner'] or '(пусто)'}\n\nчто бот о нём знает:\n{prof}")
+
+
+def contacts_overview() -> str:
+    """info без аргументов и без открытого чата: все, о ком есть память."""
+    rows = []
+    for f in sorted(CONTACTS_DIR.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True):
+        try:
+            title = f.read_text(encoding="utf-8").split("\n", 1)[0].lstrip("# ").strip()
+        except OSError:
+            continue
+        d = load_contact(int(f.stem)) if f.stem.lstrip("-").isdigit() else {"profile": "", "owner": "", "log": []}
+        facts = len([x for x in d["profile"].splitlines() if x.strip().startswith("-")])
+        rows.append(f"  {title} — фактов: {facts}{', от тебя: есть' if d['owner'] else ''}, "
+                    f"сообщений: {len(d['log'])}")
+    return ("память о собеседниках (info <кто> — подробно):\n" + "\n".join(rows)) if rows else \
+        "памяти пока нет (state/contacts пуст)"
+
+
 async def edit_contact_note(user: User, text: str) -> str:
     """Команда note: владелец правит память о человеке своими словами. Собеседнику ничего не уходит."""
     async with _memory_locks.setdefault(user.id, asyncio.Lock()):
@@ -3680,6 +3712,7 @@ COMMANDS = [
     ("history", "[кто] [n]", "последние n сообщений (по умолчанию 20)", False),
     ("tell", "[кто] <текст>", "указание боту: тема, вопрос, «скинь фото кота» — выполнит своими словами", False),
     ("forget", "[кто]", "отменить указание", False),
+    ("info", "[кто]", "сведения о человеке из памяти (шапка state/contacts/<id>.md); без <кто> — список всех", False),
     ("note", "[кто] [текст]", "память о человеке: запомнить/исправить/забыть факт или установку; ему ничего не пишет", False),
     ("write", "[кто] <текст>", "написать сообщение от себя (бот уступит тебе на TAKEOVER_MINUTES)", False),
     ("send", "[кто] <файл>", "сразу отправить медиа из media/ без модели", False),
@@ -3871,6 +3904,7 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
     cmd = (parts[0] if parts else "status").lower()
     args = parts[1:]
     aliases = {"тема": "tell", "скажи": "tell", "забудь": "forget", "напиши": "write", "запомни": "note", "?": "help",
+               "инфо": "info", "whois": "info", "кто": "info",
                "quit": "exit", "q": "exit", "h": "help", "ls": "chats"}
     if cmd == "забудь" and args and not (len(args) == 1 and _looks_like_target(args[0])):
         cmd, args = "note", ([] if current else args[:1]) + ["забудь"] + (args if current else args[1:])
@@ -3963,6 +3997,15 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         state["muted"] = sorted(set(state["muted"]) | {uid}) if cmd == "mute" else [x for x in state["muted"] if x != uid]
         save_state()
         return f"🔇 {who_name(user)} — больше не отвечаю" if cmd == "mute" else f"🔈 {who_name(user)} — снова отвечаю"
+    if cmd == "info":
+        if not args and current is None:
+            return contacts_overview()
+        user, _, err = await _target(args, current, False)
+        if err:
+            return err
+        if is_anon_bot(user):
+            return "в анонимном чате памяти нет — там каждый раз новый человек"
+        return contact_info(user.id) or f"{who_name(user)}: памяти пока нет (state/contacts/{user.id}.md не создан)"
     if cmd == "note":
         user, rest, err = await _target(args, current, len(args) > 1)
         if err:

@@ -37,8 +37,16 @@ result_text: list[str] = []
 print_lock = threading.Lock()
 
 
-def prompt() -> str:
-    return f"ub[{state['chat']}]> " if state["chat"] else "ub> "
+PROMPT_COLOR = "\033[35m" if TTY else ""   # пурпурный — не путается с сообщениями
+
+
+def prompt(rl: bool = False) -> str:
+    """rl=True — для input(): readline'у нужны \\001…\\002 вокруг escape-кодов, иначе ломается длина строки."""
+    text = f"ub[{state['chat']}]> " if state["chat"] else "ub> "
+    if not PROMPT_COLOR:
+        return text
+    on, off = (f"\001{PROMPT_COLOR}\002", f"\001{C['off']}\002") if rl else (PROMPT_COLOR, C["off"])
+    return on + text + off
 
 
 def show(text: str) -> None:
@@ -194,7 +202,7 @@ def main() -> None:
     while True:
         try:
             state["reading"] = True
-            line = input(prompt()).strip()
+            line = input(prompt(rl=True)).strip()
         except EOFError:
             print()
             break
