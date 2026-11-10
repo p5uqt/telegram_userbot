@@ -6,7 +6,6 @@
 ./ub status   одна команда и выход.
 """
 import json
-import os
 import socket
 import sys
 import threading

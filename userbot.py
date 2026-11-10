@@ -31,7 +31,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -268,28 +268,40 @@ def known_facts(history: list[str], name: str) -> str:
             + ". Это НЕ спрашивай, спроси про что-то другое.")
 
 
+# Чем владелец «занят сейчас» — по времени суток. Свои варианты: таблица [now_activities]
+# в personality.toml (см. personality.example.toml); чего там нет — берётся отсюда.
+_NOW_DEFAULTS = {
+    "night": ["can't sleep, scrolling my phone", "still up even though I have to wake up early"],
+    "morning_weekday": ["just woke up, getting ready", "drinking coffee, can barely keep my eyes open"],
+    "morning_weekend": ["just woke up, can't think straight", "lying in bed, don't wanna get up"],
+    "day_weekday": ["busy with my usual stuff, took a short break", "having lunch"],
+    "day_weekend": ["lounging at home, doing nothing", "watching a series, got distracted"],
+    "evening": ["just got home, thinking about what to eat", "resting after the day"],
+    "late": ["lying in bed, watching YouTube", "sitting at my computer", "ordered food, waiting for it"],
+}
+
+
 def now_context() -> str:
-    """What the owner is 'doing' right now — something to share about herself.
-    Stable within an hour, so she doesn't contradict herself in one conversation."""
+    """What the owner is 'doing' right now — something to share about themselves.
+    Stable within an hour, so they don't contradict themselves in one conversation."""
     now = datetime.now()
     rnd = random.Random(now.strftime("%Y%m%d%H"))
     h, weekend = now.hour, now.weekday() >= 5
     if 0 <= h < 5:
-        opts = ["can't sleep, lying in my phone", "sitting at my computer even though I have to wake up early",
-                "just finished messing with a ctf task, my head's spinning"]
+        key = "night"
     elif h < 10:
-        opts = (["just woke up, can't think straight", "lying in bed, don't wanna get up"] if weekend else
-                ["heading to class, half asleep", "late to my first class again", "drinking coffee, can barely keep my eyes open"])
+        key = "morning_weekend" if weekend else "morning_weekday"
     elif h < 16:
-        opts = (["lounging at home, doing nothing", "neighbor Dima's making another collage in the kitchen again",
-                 "watching a series, got distracted"] if weekend else
-                ["sitting in class, it's boring", "between classes", "in a networking class, the professor is so dry"])
+        key = "day_weekend" if weekend else "day_weekday"
     elif h < 20:
-        opts = ["finishing up a freelance order, the client sent more revisions",
-                "just got back from class, thinking about what to eat", "neighbor Dima's making another collage in the kitchen, Vova's hunting him"]
+        key = "evening"
     else:
-        opts = ["lying in bed, watching YouTube", "sitting at my computer, reading articles", "ordered shawarma, waiting for it",
-                "Vova (the cat) is screaming, wants food", "sitting in Discord, friends are calling me to play CS"]
+        key = "late"
+    mine = P.get("now_activities")
+    mine = mine if isinstance(mine, dict) else {}
+    opts = mine.get(key) or mine.get(key.split("_")[0]) or _NOW_DEFAULTS[key]
+    if isinstance(opts, str):
+        opts = [opts]
     return (f"It's {now.strftime('%H:%M')} now, {'weekend' if weekend else 'a weekday'}. "
             f"I'm currently: {rnd.choice(opts)}. On 'how are you' a simple 'good' is enough; if they ask directly "
             "what I'm doing — a short mention is fine.")
@@ -1049,6 +1061,17 @@ def owner_hint(chat_id: int) -> tuple[str, float] | None:
             return h
     return None
 typing_until: dict[int, float] = {}  # собеседник печатает — ждём, пока допишет
+worker_users: dict[int, User] = {}   # chat_id → собеседник (чтобы watchdog мог перезапустить ответ)
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def spawn(coro) -> asyncio.Task:
+    """create_task с сильной ссылкой: цикл событий держит задачи слабо, и фоновую
+    задачу без ссылки сборщик мусора может убрать посреди работы."""
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
 sent_log: dict[int, list[float]] = {}
 manual_during: set[int] = set()  # chats where you typed yourself while the model was thinking
 
@@ -1109,6 +1132,8 @@ async def notify(text: str) -> None:
 # ── файлы ────────────────────────────────────────────────────────────────────
 # Папка, из которой бот может отправлять файлы и куда сохраняет созданные им.
 FILES_DIR = Path(os.environ.get("FILES_DIR") or HERE / "files").resolve()
+# 0 = бот ничего не отправляет из папки и не создаёт файлов (присланные ему файлы читает по-прежнему)
+FILES_SEND = env_str("FILES_SEND", default="1") == "1"
 TEXT_EXT = {
     ".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".tsv", ".log", ".ini", ".cfg",
     ".conf", ".yaml", ".yml", ".toml", ".xml", ".html", ".htm", ".css", ".sql", ".sh",
@@ -1234,6 +1259,11 @@ def create_file(name: str, content: str) -> Path | None:
 
 
 def files_note() -> str:
+    if not FILES_SEND:
+        return ("=== Файлы ===\n"
+                "Тебе могут присылать файлы: в переписке они выглядят как [файл «имя»] с содержимым - "
+                "читай и отвечай по нему как человек, не пересказывай целиком.\n"
+                "Сам ты файлы не отправляешь и не создаёшь: если просят - откажись по-человечески.")
     lines = []
     for f in list_files():
         kb = max(1, f.stat().st_size // 1024)
@@ -1335,6 +1365,8 @@ def extract_file_actions(raw: str) -> tuple[str, list[tuple]]:
     rest = FILE_SEND_RE.sub("", rest)
     acts += [("media", m.group(1)) for m in MEDIA_TAG_RE.finditer(rest)][:1]  # медиа — по одному за ответ
     rest = MEDIA_TAG_RE.sub("", rest)
+    if not FILES_SEND:  # отправка файлов выключена — теги вырезаем, но ничего не делаем
+        acts = [a for a in acts if a[0] == "media"]
     return re.sub(r"\n{3,}", "\n\n", rest).strip(), acts[:3]
 
 
@@ -1671,6 +1703,8 @@ async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | 
         save_state()
         return
     if anon_partner is not None and (not state.get("anon_active") or state.get("anon_partner") != anon_partner):
+        done.pop(it["name"], None)  # иначе «pending» висит до перезапуска
+        save_state()
         return  # анонимный собеседник уже сменился
     msg_id = await send_media(chat_id, it, caption if it["kind"] in ("photo", "video") else None)
     if not msg_id:
@@ -2086,7 +2120,7 @@ async def load_media_frame(m) -> None:
 
 # ── видео и кружочки: несколько кадров одной картинкой-сеткой ────────────────
 VIDEO_FRAMES = int(env_float("VIDEO_FRAMES", 4))          # 4 → сетка 2×2, 6 → 3×2, 9 → 3×3
-VIDEO_MAX_MB = env_float("VIDEO_MAX_MB", 40)               # больше — не качаем, только превью
+VIDEO_MAX_MB = env_float("VIDEO_MAX_MB", 300)              # больше — не качаем, только превью
 _GRID = {1: (1, 1), 2: (2, 1), 3: (3, 1), 4: (2, 2), 6: (3, 2), 9: (3, 3)}
 
 
@@ -2442,7 +2476,7 @@ _EMOJI = re.compile(
     flags=re.UNICODE,
 )
 # текстовые смайлы в конце токенов: ))), :), :-D, =) и т.п.
-_TEXT_SMILEY = re.compile(r"\s*(?:[:;=]-?[)(dpDPоО3]+|\){2,}|\({2,})")
+_TEXT_SMILEY = re.compile(r"\s*(?:(?<![\d:;=])[:;=]-?(?:[)(]+|[dpDPоО3]+(?!\w))|\){2,}|\({2,})")
 # служебные пометки модели в любом регистре
 _SERVICE_RE = re.compile(r"\[\s*(?:next|skip|escalate)\s*\]", re.I)
 
@@ -2604,11 +2638,23 @@ def _masc_verb(stem: str, end: str) -> str:
     return base + ("л" if end.lower() == "ла" else "лся")
 
 
+# существительные на «-ла»: «я уже дела закончил» — не глагол женского рода
+_NOT_VERBS = {"дела", "тела", "сила", "школа", "скала", "игла", "пчела", "стрела", "метла", "смола", "зола",
+              "мила", "кола", "пила", "села", "мгла", "хвала", "юла", "зала", "стола", "числа", "угла", "зла",
+              "тепла", "стекла", "масла", "весла", "кресла", "ремесла", "посла", "осла", "козла", "узла", "орла"}
+
+
 def masculinize(text: str) -> str:
     """Владелец - парень: модель иногда сбивается на «я ассистент... ограничена»."""
     if CFG["owner_gender"] != "m":
         return text
-    text = _FEM_VERB_RE.sub(lambda m: m.group(1) + m.group(2) + _masc_verb(m.group(3), m.group(4)), text)
+
+    def verb(m: re.Match) -> str:
+        if (m.group(3) + m.group(4)).lower() in _NOT_VERBS:
+            return m.group(0)
+        return m.group(1) + m.group(2) + _masc_verb(m.group(3), m.group(4))
+
+    text = _FEM_VERB_RE.sub(verb, text)
     return _FEM_ADJ_RE.sub(lambda m: m.group(1) + m.group(2) + _FEM_ADJ[m.group(3).lower()], text)
 
 
@@ -2772,7 +2818,7 @@ async def respond(chat_id: int, user: User) -> None:
         limit = CFG["anon_max_per_hour"] if anon else CFG["max_per_hour"]
         await notify(f"⏸ {name}: лимит {limit} ответов/час, жду тебя")
         return
-    await client.send_read_acknowledge(chat_id)
+    await tg(client.send_read_acknowledge(chat_id))
     asks_now = re.search(r"что делаешь|чё делаешь|чем занят|что щас делаешь", last_text, re.I)
     pending = unanswered(history)
     if not anon:
@@ -2975,15 +3021,22 @@ async def respond(chat_id: int, user: User) -> None:
     if new_hint and new_hint[1] > t0:
         print(f"[{name}] пока думал, ты дал новое указание — переделываю ответ")
         return  # worker перезапустит ответ уже с новым указанием
-    if last_incoming.get(chat_id, 0) > t0 or time.time() < typing_until.get(chat_id, 0):
+    # он печатает прямо сейчас — ждём, допишет ли. Раньше ответ тут просто выбрасывался, и если
+    # собеседник попечатал и ничего не отправил, он оставался вообще без ответа
+    wait_until = time.time() + 30
+    while last_incoming.get(chat_id, 0) <= t0 and time.time() < min(wait_until, typing_until.get(chat_id, 0)):
+        await asyncio.sleep(0.5)
+    if last_incoming.get(chat_id, 0) > t0:
         print(f"[{name}] пока думал, пришло новое — отвечу на всё сразу")
         return  # worker увидит новое сообщение и сгенерирует ответ на всю пачку
+    if state["paused"] or chat_id in manual_during or (anon and not state.get("anon_active")):
+        return
     if reply:
         recent_replies.setdefault(chat_id, []).append(norm_reply(reply))
         recent_parts.setdefault(chat_id, []).extend(
             norm_reply(p) for p in _PART_SPLIT.split(reply) if norm_reply(p))
         del recent_parts[chat_id][:-20]  # помним ~20 последних кусочков своих реплик
-    del recent_replies[chat_id][:-6]  # помним последние 6 своих реплик
+        del recent_replies[chat_id][:-6]  # помним последние 6 своих реплик
     if any(a[0] == "media" for a in file_actions):
         asked = media_asked(history) if not MEDIA_SELF and not hint_text else set()
         keep, why_drop = [], ""
@@ -2999,6 +3052,10 @@ async def respond(chat_id: int, user: User) -> None:
                     why_drop = why_drop or ("pending" if st == "pending" else "already")
                     print(f"[{name}] {it['name']} уже {'в очереди' if st == 'pending' else 'есть в чате'} — не дублирую")
                     continue
+            if a[0] == "media" and not it:
+                print(f"[{name}] медиа «{a[1]}» нет / вид выключен (MEDIA_SEND) — не отправляю")
+                why_drop = why_drop or "missing"
+                continue
             if a[0] == "media" and (asked is None or (it and asked and it["kind"] not in asked)):
                 why = "не просили" if asked is None else f"просили {', '.join(sorted(asked))}"
                 print(f"[{name}] медиа «{a[1]}» не отправляю — {why} (MEDIA_SELF=0)")
@@ -3066,6 +3123,7 @@ async def respond(chat_id: int, user: User) -> None:
             await asyncio.sleep(random.uniform(0.5, 1.5))
             msg = await tg(client.send_message(chat_id, correction))
             remember_bot_msg(chat_id, msg.id)
+            save_state()  # иначе после перезапуска «*слово» выглядит как написанное тобой вручную
         await notify(f"🤖 → {name}:\n{reply}")
     if hint and owner_hints.get(chat_id) == hint:
         owner_hints.pop(chat_id, None)  # указание выполнено
@@ -3083,6 +3141,7 @@ async def respond(chat_id: int, user: User) -> None:
 
 
 async def worker(chat_id: int, user: User) -> None:
+    worker_users[chat_id] = user
     try:
         while True:
             started = time.time()
@@ -3122,6 +3181,9 @@ async def worker(chat_id: int, user: User) -> None:
             workers.pop(chat_id, None)
 
 
+_stuck_retry: dict[int, float] = {}   # chat_id → last_incoming, на котором ответ уже перезапускали
+
+
 async def watchdog() -> None:
     """Сторож от «живого, но мёртвого» процесса.
 
@@ -3154,6 +3216,13 @@ async def watchdog() -> None:
             task = workers.pop(chat_id, None)
             if task and task is not asyncio.current_task():
                 task.cancel()
+            user = worker_users.get(chat_id)
+            mark = last_incoming.get(chat_id, 0)
+            if user and not state["paused"] and _stuck_retry.get(chat_id) != mark:
+                _stuck_retry[chat_id] = mark  # одна повторная попытка на одну пачку сообщений
+                workers[chat_id] = spawn(worker(chat_id, user))
+            elif user and not state["paused"]:
+                await notify(f"⚠️ {chat_id}: ответ завис дважды — больше не пробую, ответь сам")
 
 
 _searching = False
@@ -3224,7 +3293,7 @@ async def on_incoming(event):
                 print("[anon] диалог закончен")
                 # "Вы закончили…" = you pressed /stop yourself → don't restart the search
                 if CFG["auto_next"] and not state["paused"] and not re.search(r"Вы закончили", text, re.I):
-                    asyncio.create_task(auto_search(chat_id))
+                    spawn(auto_search(chat_id))
         save_state()
         return
     incoming = (event.raw_text or "").strip()
@@ -3399,7 +3468,7 @@ def help_text(cmd: str = "", console: bool = True) -> str:
         c = next((c for c in COMMANDS if c[0] == cmd), None)
         if not c:
             return f"нет команды «{cmd}» — help"
-        return (f"{pre}{c[0]} {c[1]}\n  {c[2]}"
+        return (f"{'' if console else 'ℹ️ '}{pre}{c[0]} {c[1]}\n  {c[2]}"
                 + (f"\n{HELP_DETAILS[cmd]}" if cmd in HELP_DETAILS else "")
                 + ("" if console or not c[3] else "\n(только в ub)"))
     rows = [f"  {pre}{name} {args}".ljust(30) + f" {desc}"
@@ -3519,7 +3588,7 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         n = int(args[0]) if args and args[0].isdigit() else 15
         _last_chats.clear()
         rows = []
-        async for d in client.iter_dialogs(limit=80):
+        for d in await tg_iter(client.iter_dialogs(limit=80)):
             u = d.entity
             if not isinstance(u, User) or u.is_self or (u.bot and not is_anon_bot(u)):
                 continue
@@ -3547,15 +3616,21 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         if RESTART["pending"]:
             return "перезапуск уже ждёт — бот ещё думает: " + (", ".join(map(str, worker_started)) or "—")
         RESTART["pending"] = True
-        asyncio.create_task(restart_when_idle())
+        spawn(restart_when_idle())
         lost = f"\n⚠️ отложенные медиа ({len(_media_tasks)}) не уйдут" if _media_tasks else ""
         if worker_started:
             return (f"🔄 перезапущусь, как только бот допишет ответ (думает: "
                     f"{', '.join(map(str, worker_started))}); новые ответы пока не начинаю{lost}")
         return f"🔄 перезапускаюсь…{lost}"
     if cmd in ("pause", "resume"):
+        was_paused = state["paused"]
         state["paused"] = cmd == "pause"
         save_state()
+        if cmd == "resume" and was_paused:
+            # на паузе входящие вообще не обрабатываются: поднимаем непрочитанное за это время
+            # и заново выясняем, идёт ли диалог в анонимном чате (служебные сообщения тоже пропущены)
+            spawn(resume_catch_up())
+            return "▶️ автоответы включены — отвечу на непрочитанное за время паузы"
         return "⏸ автоответы на паузе" if state["paused"] else "▶️ автоответы включены"
     if cmd == "history":
         rest, n = list(args), 20
@@ -3590,6 +3665,9 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
             owner_hints[user.id] = (rest, time.time())
             busy = user.id in worker_started
             kick_worker(user.id, user)
+            if state["paused"]:
+                return (f"📝 {who_name(user)}: «{rest}»\n⏸ бот на паузе — указание не выполнится; "
+                        "сними паузу (resume) и повтори tell")
             return (f"📝 {who_name(user)}: «{rest}»\n"
                     + ("бот сейчас думает — переделает ответ с указанием" if busy else "напишу с учётом этого"))
         if cmd == "write":
@@ -3601,14 +3679,14 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         if not it:
             return f"нет медиа «{rest}» — список: media"
         media_sent_in(user.id)[it["name"]] = "pending"
-        asyncio.create_task(send_media_now(user.id, user, it))
+        spawn(send_media_now(user.id, user, it))
         return f"📤 {who_name(user)}: отправляю {MEDIA_KIND_RU[it['kind']]} {it['name']}"
     return f"не знаю команду «{cmd}» — help"
 
 
 async def on_command(event):
     text = (event.raw_text or "").strip()
-    if not text.startswith(".ub"):
+    if not re.match(r"\.ub(\s|$)", text):
         return
     try:
         reply = await run_command(text[3:].strip())
@@ -3726,7 +3804,7 @@ async def catch_up(max_age_hours: float = 24) -> None:
         save_state()
         print(f"[anon] режим анонимного чата @{CFG['anon_bot']}, диалог {'идёт' if state['anon_active'] else 'не идёт'}")
         if not state["anon_active"] and CFG["auto_next"] and not state["paused"]:
-            asyncio.create_task(auto_search(ANON_CHAT_ID))
+            spawn(auto_search(ANON_CHAT_ID))
     if state["paused"]:
         return
     cutoff = time.time() - max_age_hours * 3600
@@ -3735,9 +3813,19 @@ async def catch_up(max_age_hours: float = 24) -> None:
             continue
         if d.message.date.timestamp() < cutoff or not allowed(d.entity):
             continue
+        if d.id in workers:
+            continue  # уже отвечаем
         print(f"[userbot] непрочитанное от {display_name(d.entity)} — отвечу")
         last_incoming[d.id] = time.time()
-        workers[d.id] = asyncio.create_task(worker(d.id, d.entity))
+        workers[d.id] = spawn(worker(d.id, d.entity))
+
+
+async def resume_catch_up() -> None:
+    try:
+        await catch_up()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[userbot] после resume не смог поднять непрочитанное: {exc}", file=sys.stderr)
+        await notify(f"⚠️ после resume не смог поднять непрочитанное: {exc}")
 
 
 _LOCK_FH = None
@@ -3837,10 +3925,10 @@ async def main() -> None:
         print(f"[userbot] режим «только анонимный чат»: отвечаю лишь в @{CFG['anon_bot']}")
     elif not CFG["allow"] and not CFG["allow_non_contacts"]:
         print("[userbot] внимание: белый список пуст — отвечать некому")
-    asyncio.create_task(preload_whisper())
-    asyncio.create_task(watchdog())
+    spawn(preload_whisper())
+    spawn(watchdog())
     await catch_up()
-    asyncio.create_task(sync_all_contacts())
+    spawn(sync_all_contacts())
     await start_control_server()
     await client.run_until_disconnected()
     if RESTART["exit"]:
