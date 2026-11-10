@@ -281,6 +281,54 @@ _NOW_DEFAULTS = {
 }
 
 
+_HOUR_NOM = ("двенадцать", "час", "два", "три", "четыре", "пять", "шесть", "семь", "восемь",
+             "девять", "десять", "одиннадцать")
+_HOUR_GEN = ("двенадцатого", "первого", "второго", "третьего", "четвёртого", "пятого", "шестого",
+             "седьмого", "восьмого", "девятого", "десятого", "одиннадцатого")
+_WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+_MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
+               "сентября", "октября", "ноября", "декабря")
+
+
+def _day_part(h: int) -> str:
+    return "ночи" if h < 4 else "утра" if h < 12 else "дня" if h < 17 else "вечера"
+
+
+def spoken_time(now: datetime) -> str:
+    """Время так, как его говорят вслух: «полдвенадцатого вечера», «почти полночь».
+    Слабая модель сама 23:27 в слова переводит с ошибками («почти одиннадцать»)."""
+    h, m = now.hour, now.minute
+    nxt = (h + 1) % 24
+
+    def whole(hour: int) -> str:
+        if hour == 0:
+            return "полночь"
+        if hour == 12:
+            return "полдень"
+        return f"{_HOUR_NOM[hour % 12]} {_day_part(hour)}"
+
+    if m < 5:
+        return whole(h)  # 23:03 — это всё ещё «одиннадцать вечера», точные цифры идут рядом
+    if m < 23:
+        return f"начало {_HOUR_GEN[nxt % 12]} {_day_part(h)}"
+    if m < 38:
+        return f"пол{_HOUR_GEN[nxt % 12]} {_day_part(h)}"
+    if m < 53:
+        left = {40: "двадцати", 45: "пятнадцати", 50: "десяти"}[min((40, 45, 50), key=lambda x: abs(x - m))]
+        return f"без {left} {_HOUR_NOM[nxt % 12]} {'ночи' if nxt == 0 else _day_part(nxt)}"
+    return f"почти {whole(nxt)}"
+
+
+def time_hint(now: datetime | None = None) -> str:
+    """Готовая строка о текущем времени для модели — чтобы она ничего не считала сама."""
+    now = now or datetime.now()
+    h12 = now.hour % 12 or 12
+    return (f"сейчас {now.strftime('%H:%M')} ({h12}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}), "
+            f"словами «{spoken_time(now)}», {_WEEKDAYS[now.weekday()]}, {now.day} {_MONTHS_GEN[now.month - 1]} "
+            f"{now.year}. Про время, время суток и день недели говори только по этим данным, сам не считай "
+            "и не противоречь тому, что уже писал про время выше")
+
+
 def now_context() -> str:
     """What the owner is 'doing' right now — something to share about themselves.
     Stable within an hour, so they don't contradict themselves in one conversation."""
@@ -302,7 +350,7 @@ def now_context() -> str:
     opts = mine.get(key) or mine.get(key.split("_")[0]) or _NOW_DEFAULTS[key]
     if isinstance(opts, str):
         opts = [opts]
-    return (f"It's {now.strftime('%H:%M')} now, {'weekend' if weekend else 'a weekday'}. "
+    return (f"It's {now.strftime('%H:%M')} now ({spoken_time(now)}), {'weekend' if weekend else 'a weekday'}. "
             f"I'm currently: {rnd.choice(opts)}. On 'how are you' a simple 'good' is enough; if they ask directly "
             "what I'm doing — a short mention is fine.")
 
@@ -776,11 +824,10 @@ def disclosure_note(name: str) -> str:
 
 def build_task(name: str, history: list[str], extra: str = "", note: str = "") -> str:
     persona = load_persona()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M, %A")
     disc = disclosure_note(name)
     task = (
         f"{rules(disc, name)}\n\n{files_note()}\n\n{media_note()}=== О владельце ===\n{persona}\n\n{profile_block(name)}"
-        f"=== Сейчас: {now}. Собеседник: {name} ===\n"
+        f"=== Собеседник: {name}. Время: {time_hint()} ===\n"
         + PHOTO_TAG_RE.sub(media_unseen, "\n".join(history))
         + (f"\n\n=== Подсказка ===\n{note}" if note else "")
         + "\n\n=== Напиши следующий ответ владельца ==="
@@ -806,7 +853,6 @@ def build_messages(name: str, history: list[str], extra: str = "", note: str = "
     """Та же задача, но настоящими ролями чата — слабая локальная модель так
     не путает свои реплики с чужими и не проигрывает обе стороны диалога."""
     persona = load_persona()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M, %A")
     disc = disclosure_note(name)
     system = (
         f"{rules(disc, name)}\n\n{files_note()}\n\n{media_note()}=== О владельце ===\n{persona}\n\n{profile_block(name)}"
@@ -835,7 +881,7 @@ def build_messages(name: str, history: list[str], extra: str = "", note: str = "
         # время и подсказка — в самом конце: system и история не меняются между
         # ответами, и llama.cpp берёт их из кэша вместо пересчёта всего промпта.
         # подсказку в конце system слабая модель часто игнорирует — дублируем рядом с репликой
-        hints = [f"сейчас {now}"]
+        hints = [time_hint()]
         last = msgs[-1]["content"]
         rm = REPLY_RE.search(last) if isinstance(last, str) else None
         if rm:
@@ -2749,6 +2795,47 @@ def humanize(text: str) -> str:
     return text
 
 
+def _smiley_parens(text: str) -> list[int]:
+    """Позиции «)»-смайлов: закрывающих скобок, у которых нет своей открывающей."""
+    pos, depth = [], 0
+    for i, ch in enumerate(text):
+        if ch == "\n":
+            depth = 0
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth:
+                depth -= 1
+            else:
+                pos.append(i)
+    return pos
+
+
+SMILEY_GAP = int(env_float("SMILEY_GAP", 4))  # после «)» столько своих сообщений подряд без скобки
+
+
+def ration_smileys(reply: str, history: list[str]) -> str:
+    """«)» в каждом сообщении выдаёт бота: оставляем одну скобку на ответ и только если
+    в последних SMILEY_GAP своих сообщениях её не было. Остальные убираем."""
+    pos = _smiley_parens(reply)
+    if not pos:
+        return reply
+    mine = [t[1] for t in map(_history_turn, history) if t and t[0] == "assistant"]
+    recent = mine[-SMILEY_GAP:] if SMILEY_GAP > 0 else []
+    keep = None if any(_smiley_parens(x) for x in recent) else pos[0]
+    out, last = [], 0
+    for i in pos:
+        if i == keep:
+            continue
+        out.append(reply[last:i])
+        # «привет) как ты?» → «привет, как ты?»; в конце строки скобка просто исчезает
+        if re.match(r" +\w", reply[i + 1:]) and re.search(r"\w$", reply[last:i]):
+            out.append(",")
+        last = i + 1
+    out.append(reply[last:])
+    return re.sub(r"[ \t]+(?=\n|$)", "", "".join(out)).strip()
+
+
 def typing_seconds(part: str) -> float:
     """Сколько живой человек набирал бы это сообщение: длиннее текст — дольше «печатает»."""
     cps = max(0.5, CFG["typing_cps"]) * random.uniform(0.8, 1.25)
@@ -2822,7 +2909,9 @@ async def respond(chat_id: int, user: User) -> None:
         await notify(f"⏸ {name}: лимит {limit} ответов/час, жду тебя")
         return
     await tg(client.send_read_acknowledge(chat_id))
-    asks_now = re.search(r"что делаешь|чё делаешь|чем занят|что щас делаешь", last_text, re.I)
+    asks_now = re.search(r"\b(?:что|чт[оё]|ч[еёо]|шо)\s+(?:(?:ты|щас|сейчас|там)\s+)*(?:делаешь|делаете|творишь)"
+                         r"|чем\s+(?:(?:ты|щас|сейчас)\s+)*(?:занят|занимаешься\s+(?:щас|сейчас))"
+                         r"|\bwyd\b|what(?:'re| are)? (?:you|u) (?:doing|up to)", last_text, re.I)
     pending = unanswered(history)
     if not anon:
         await sync_contact(chat_id, user)
@@ -3020,6 +3109,11 @@ async def respond(chat_id: int, user: User) -> None:
     if anon and first_reply and reply and not _GREET_RE.match(reply):
         # анонимка — не личка: новому собеседнику всегда сначала «привет»
         reply = "привет, " + reply[0].lower() + reply[1:]
+    if reply:
+        rationed = ration_smileys(reply, history)
+        if rationed != reply:
+            print(f"[{name}] убрал лишние скобки: «{reply}» → «{rationed}»")
+        reply = rationed or reply
     new_hint = owner_hint(chat_id)
     if new_hint and new_hint[1] > t0:
         print(f"[{name}] пока думал, ты дал новое указание — переделываю ответ")
