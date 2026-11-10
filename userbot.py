@@ -950,14 +950,17 @@ def _openai_call(messages: list[dict], max_tokens: int | None = None) -> str:
     }
     if CFG["engine"] == "llamacpp":
         # параметры llama-server (облачные API на них ругаются — шлём только сюда).
-        # рекомендации Qwen: без размышлений top_p 0.8, с размышлениями 0.95
-        body.update({
-            "top_p": 0.95 if think else 0.8,
-            "top_k": 20,
-            "min_p": 0.0,
-            "presence_penalty": 0.5,
-            "chat_template_kwargs": {"enable_thinking": think},
-        })
+        body["chat_template_kwargs"] = {"enable_thinking": think}
+        if "qwen" in CFG["llm_model"].lower():
+            # рекомендации Qwen: без размышлений top_p 0.8, с размышлениями 0.95
+            body.update({
+                "top_p": 0.95 if think else 0.8,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.5,
+            })
+        # для остальных моделей (Gemma и т.д.) top_k/top_p/min_p/DRY берутся из
+        # настроек самого llama-server (run-server.sh)
     headers = {"Content-Type": "application/json"}
     if CFG["llm_key"]:
         headers["Authorization"] = f"Bearer {CFG['llm_key']}"
