@@ -1685,6 +1685,30 @@ MEDIA_LANG: contextvars.ContextVar[str | None] = contextvars.ContextVar("MEDIA_L
 _QUOTED_RE = re.compile(r"«([^»]+)»|\"([^\"]+)\"")
 
 
+def about_from_name(f: Path, kind: str) -> str:
+    """Записи в media.toml нет — что в файле, понимаем по его названию («как дела.mp3»)."""
+    name = re.sub(r"\s+", " ", f.stem.replace("_", " ")).strip()
+    if kind == "voice":
+        # «да (грустно)» → говорю «да», пометка в скобках — как говорю, а не часть фразы
+        m = re.fullmatch(r"(.+?)\s*\(([^()]+)\)", name)
+        if m:
+            return f"голосовое, говорю: «{m.group(1)}» ({m.group(2).strip()})"
+        return f"голосовое, говорю: «{name}»"
+    if kind == "round":
+        return f"кружочек: {name}"
+    return f"{MEDIA_KIND_RU[kind]}: {name}"
+
+
+def name_lang(f: Path, kind: str) -> str | None:
+    """Язык голосового/кружка без записи в media.toml — по буквам в названии файла.
+    Фото/видео без речи подходят всем."""
+    if kind not in ("voice", "round"):
+        return None
+    cyr = len(re.findall(r"[а-яёіїєґ]", f.stem, re.I))
+    lat = len(re.findall(r"[a-z]", f.stem, re.I))
+    return "ru" if cyr > lat else "en" if lat > cyr else None
+
+
 def media_lang(m: dict, kind: str) -> str | None:
     """Язык медиа: поле lang из media.toml; для голосовых/кружков без него — по расшифровке в «…»."""
     lang = str(m.get("lang") or "").strip().lower()
@@ -1735,14 +1759,14 @@ def load_media(kinds: set[str] | None = None) -> dict[str, dict]:
             when = str(m.get("when") or ("later" if "later" in f.relative_to(base).parts[:-1] else "now")).lower()
             if when == "never":
                 continue
-            lang = media_lang(m, kind)
+            lang = media_lang(m, kind) if m else name_lang(f, kind)
             if not lang_fits(lang, chat_lang):
                 continue
             delay = m.get("delay") or MEDIA_LATER
             if isinstance(delay, (int, float)):
                 delay = (delay, delay)
             items[rel] = {"path": f, "kind": kind, "name": rel,
-                          "about": str(m.get("about") or f.stem.replace("_", " ")).strip(),
+                          "about": str(m.get("about") or about_from_name(f, kind)).strip(),
                           "when": "later" if when == "later" else "now", "lang": lang,
                           "delay": (float(delay[0]), float(delay[-1]))}
     return dict(list(items.items())[:60])
@@ -2205,75 +2229,6 @@ async def preload_whisper() -> None:
             print(f"[voice] whisper «{WHISPER_MODEL}» готов")
         except Exception as exc:  # noqa: BLE001
             print(f"[voice] whisper не загрузился ({exc}) — голосовые не расшифровываю", file=sys.stderr)
-
-
-# ── свои голосовые: расшифровка в media.toml ────────────────────────────────
-# Бот сам свои медиа не слушает — знает о них только about из media.toml. Голосовые без записи
-# там расшифровываем whisper'ом и дописываем запись в конец файла (проверь и поправь при желании).
-
-def _media_toml_files() -> set[str]:
-    """Какие файлы уже упомянуты в media.toml (путь и просто имя, в нижнем регистре)."""
-    mf = MEDIA_DIR / "media.toml"
-    if not mf.exists():
-        return set()
-    import tomllib  # noqa: PLC0415
-    with open(mf, "rb") as fh:
-        items = tomllib.load(fh).get("media", [])
-    out = set()
-    for it in items:
-        f = str(it.get("file") or "").strip().lower()
-        if f:
-            out |= {f, f.rsplit("/", 1)[-1]}
-    return out
-
-
-def _describe_voices_sync() -> list[str]:
-    base = MEDIA_DIR / "voice"
-    if not base.is_dir():
-        return []
-    (MEDIA_DIR / ".cache").mkdir(exist_ok=True)
-    done = []
-    # папка media/ бывает общей у нескольких аккаунтов — дописываем по очереди
-    with open(MEDIA_DIR / ".cache" / "media_toml.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            known = _media_toml_files()
-        except Exception as exc:  # noqa: BLE001 — сломанный toml не перезаписываем
-            print(f"[медиа] media.toml не читается, расшифровку пропускаю: {exc}", file=sys.stderr)
-            return []
-        for f in sorted(base.rglob("*")):
-            if not f.is_file() or f.name.startswith(".") or f.suffix.lower() not in _MEDIA_EXT["voice"]:
-                continue
-            rel = f.relative_to(MEDIA_DIR).as_posix()
-            if rel.lower() in known or f.name.lower() in known:
-                continue
-            try:
-                text, lang = _transcribe_lang(f.read_bytes())
-            except Exception as exc:  # noqa: BLE001
-                print(f"[медиа] {rel}: не расшифровал ({exc})", file=sys.stderr)
-                continue
-            if len(text) > 300:   # список медиа идёт в каждый промпт — длинное не тащим целиком
-                text = text[:300].rsplit(" ", 1)[0] + "…"
-            about = f"говорю: «{text}»" if text else "голосовое, речь не распознана — опиши сам"
-            block = (f"\n[[media]]\nfile  = {json.dumps(rel, ensure_ascii=False)}\n"
-                     f"about = {json.dumps(about, ensure_ascii=False)}   # расшифровано автоматически — проверь\n"
-                     + (f"lang  = {json.dumps(lang)}\n" if lang else ""))
-            with open(MEDIA_DIR / "media.toml", "a", encoding="utf-8") as fh:
-                fh.write(block)
-            known.add(rel.lower())
-            done.append(f"{rel} [{lang or '?'}]: {about}")
-    return done
-
-
-async def describe_voices_loop() -> None:
-    """При запуске и раз в 5 минут — расшифровать новые свои голосовые в media.toml."""
-    while whisper_on():
-        try:
-            for line in await asyncio.to_thread(_describe_voices_sync):
-                print(f"[медиа] расшифровал своё голосовое → media.toml: {line[:200]}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[медиа] расшифровка своих голосовых: {exc}", file=sys.stderr)
-        await asyncio.sleep(300)
 
 
 def _a() -> str:
@@ -4717,8 +4672,6 @@ async def main() -> None:
     elif not CFG["allow"] and not CFG["allow_non_contacts"]:
         print("[userbot] внимание: белый список пуст — отвечать некому")
     spawn(preload_whisper())
-    if "voice" in MEDIA_SEND:
-        spawn(describe_voices_loop())
     spawn(watchdog())
     if CFG["anon_bot"]:
         spawn(anon_idle_watch())

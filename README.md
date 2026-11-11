@@ -621,7 +621,7 @@ The `media/` folder is in `.gitignore` — your files won't get into the reposit
 ### Descriptions: `media/media.toml`
 
 The bot **doesn't look at the files itself** — it knows only what's written
-in `media/media.toml` (your own voice messages get transcribed into it automatically, see below). Based on these descriptions the model decides what fits the conversation.
+in `media/media.toml`, and if there's no entry there — what the **file name** says (see below). Based on these descriptions the model decides what fits the conversation.
 The full commented template is `media.example.toml`.
 
 ```toml
@@ -650,29 +650,22 @@ when  = "never"                          # don't send
 | Field | Meaning |
 |---|---|
 | `file` | path to the file from `media/` or just the file name (required) |
-| `about` | what's in the photo/video or what you say in the voice/video message. Without it the bot knows only the file name |
+| `about` | what's in the photo/video or what you say in the voice/video message. Without it the bot goes by the file name |
 | `when` | `now` — right away when asked or when it fits (default); `later` — stall; `never` — don't send |
 | `delay` | for `later`: `[min, max]` minutes until sending (otherwise `MEDIA_LATER_MIN/MAX`) |
 | `lang` | media language: `ru`, `en`, `uk`… English media goes only to people who write in English, the rest only to people who don't; without `lang` — to everyone |
 
-A file without an entry in `media.toml` works too: description = file name, `when` = `now`
-(or `later` if it's in a `later/` subfolder).
+**Without an entry in `media.toml` the bot understands a file by its name.** So name files after what's in them:
+a voice message — by the words you say (`voice/how are you.mp3`, `voice/reading a book, wbu.mp3`), photos and
+videos — by what's on them (`photo/cat sleeping on the windowsill.jpg`). The model sees e.g.
+`голосовое, говорю: «reading a book, wbu»` ("voice message, I say: …"); `_` in the name counts as a space. `when` = `now`
+(or `later` if the file is in a `later/` subfolder). The language of a voice/video message without an entry is taken
+from the letters of its name: Cyrillic — `ru`, Latin — `en`; photos and videos fit everyone.
+An entry in `media.toml` always wins over the name — write one when the name can't hold everything
+(or you need `when`, `delay`, `lang`).
 
-**Your voice messages are transcribed automatically.** If voice is enabled (`voice` in `MEDIA_SEND`) and
-whisper works (`WHISPER_MODEL`), on start and then every 5 minutes the bot finds files in `media/voice/`
-without an entry in `media.toml`, transcribes them and appends an entry to the end of the file:
-```toml
-[[media]]
-file  = "voice/bus.ogg"
-about = "говорю: «привет, я щас в автобусе, не могу писать»"   # расшифровано автоматически — проверь
-```
-(`говорю` = "I say"; the comment means "auto-transcribed — check it".) Whisper detects the language itself and writes it to `lang` (when confident). So you can keep
-Russian and English voice messages in one folder: the bot offers each person only voice messages in their language
-(by their latest message). For older entries without `lang`, the language of a voice/video message is guessed
-from the text in «quotes» in `about`.
-Check the text and fix it or add `when`
-if you like. Entries you wrote yourself are never touched; to re-transcribe a file, delete its entry.
-Describe photos, videos and video messages yourself.
+The bot never listens to or looks at your own media: neither whisper nor vision is applied to them.
+Voice messages **from other people** are still transcribed (see "The other person's voice and video messages").
 
 ### How it looks
 
