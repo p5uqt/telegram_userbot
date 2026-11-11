@@ -3088,8 +3088,19 @@ _FANCY_QUOTES = re.compile("[«»“”„‟]")
 _LOL_RE = re.compile(r"[ \t,]*\b(?:lol|лол)\b", re.I)
 
 
+_HTML_BR_RE = re.compile(r"<\s*br\s*/?\s*>|</\s*(?:p|div)\s*>", re.I)
+_HTML_TAG_RE = re.compile(r"</?\s*(?:p|div|b|i|u|s|em|strong|span|code|pre|small|sup|sub|font|a)\b[^<>]*>", re.I)
+
+
+def strip_html(text: str) -> str:
+    """Модель иногда вставляет HTML (<br>, <b>…) — в Telegram это видно как есть. «<3» не трогаем."""
+    text = _HTML_BR_RE.sub("\n", text or "")
+    return re.sub(r"\n{3,}", "\n\n", _HTML_TAG_RE.sub("", text)).strip()
+
+
 def humanize(text: str) -> str:
     """Long dashes are a dead giveaway; also strip stray markdown."""
+    text = strip_html(text)
     text = _DASHES.sub("-", text)
     text = masculinize(text)
     text = re.sub(r"^\s*(работа|жизнь|учёба|учеба)\s*-\s*(это|она)\b[^.?!\n]*[.!]?\s*", "", text, flags=re.I) or text
@@ -3617,7 +3628,7 @@ async def respond(chat_id: int, user: User) -> None:
     if media_now and reply:
         # «ладно, вот моё фото» перед фото звучит неестественно: текст без «держи/вот фото» —
         # подписью к самому фото (или после голосового/кружка), а если ничего не осталось — молча шлём файл
-        cap = _SENDING_RE.sub("", reply.replace("\n", " "))
+        cap = _SENDING_RE.sub("", strip_html(reply).replace("\n", " "))
         cap = re.sub(r"^\W*(?:ну\s+)?(?:ладно|ок|окей|хорошо|ага|щас|сейчас|вот|на)\b[\s,.!)]*", "", cap, flags=re.I)
         cap = re.sub(r"\s{2,}", " ", cap).strip(" ,.!-")
         caption = cap if len(cap) >= 3 else None
