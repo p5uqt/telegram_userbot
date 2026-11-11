@@ -1,39 +1,43 @@
 # tg-llm-userbot
 
-Юзербот для Telegram, который переписывается **от твоего имени** с помощью языковой модели — локальной (llama.cpp, Ollama, LM Studio) или облачной (OpenAI, DeepSeek, OpenRouter и любой OpenAI-совместимый API).
+**English** | [Русский](README.ru.md)
 
-Пишет как живой человек: короткими сообщениями, с паузами и статусом «печатает…», без эмодзи и канцелярита, сам поддерживает разговор. Знает о тебе только то, что ты напишешь в `persona.md`.
+A Telegram userbot that chats **on your behalf** using a language model — local (llama.cpp, Ollama, LM Studio) or cloud (OpenAI, DeepSeek, OpenRouter and any OpenAI-compatible API).
 
-*A Telegram userbot that chats on your behalf using any OpenAI-compatible LLM (local or cloud). Russian-first; docs in Russian.*
+It writes like a real person: short messages, pauses and a "typing…" status, no emoji or corporate speak, and it keeps the conversation going on its own. It knows about you only what you write in `persona.md`.
 
----
-
-## Возможности
-
-- **Два режима**
-  - **Личные чаты** — отвечает только людям из белого списка (и, по желанию, всем, кого нет в контактах).
-  - **Анонимный чат-бот** (например, @AnonRuBot) — общается со случайными собеседниками, сам жмёт `/search` после конца диалога.
-- **Любая модель**: llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, DeepSeek, OpenAI — всё, что говорит на OpenAI API. Плюс родной API Ollama и DeepSeek Harness.
-- **Человечное поведение**
-  - пауза перед прочтением, ждёт, пока собеседник допишет серию сообщений;
-  - «печатает…» пропорционально длине ответа;
-  - разбивает «утверждение + вопрос» на два сообщения;
-  - без точек в конце, без длинных тире, без эмодзи и роботских «понятно, ...».
-- **Не молчит**: если модель выдала пустоту или сухое «ок» — переспрашивает её; на крайний случай — запасная фраза.
-- **Понимает сленг анонимок**: «м/д», «мд?», «м20», «го обмен».
-- **Помнит, что уже известно** о собеседнике (пол, возраст) и не переспрашивает.
-- **Видит фото, стикеры, гифки, видео и кружочки** (опционально, с vision-моделью), в том числе одноразовые.
-- **Слушает голосовые и кружочки**: распознаёт речь локально (faster-whisper), в облако ничего не уходит.
-- **Читает присланные файлы** (текст, код, .docx) и может отправить файл из своей папки.
-- **Помнит собеседников**: ведёт заметку о каждом человеке и подмешивает её в следующие разговоры.
-- **Входящие звонки**: может сбросить и написать, что сейчас не может говорить.
-- **Отправляет свои фото, видео, голосовые и кружочки** из папки `media/` (опционально): что можно сразу, а с чем потянуть время — задаёшь сам.
-- **Уступает тебе**: если ты сам написал в чат — бот замолкает на заданное время.
-- **Управление** из терминала (`./ub`) и из «Избранного»: пауза, статус, указания боту на ходу, заглушить человека.
+> [!NOTE]
+> The bot is Russian-first: its console messages, `ub` output and default phrases are in Russian. It answers in English when the other person writes in English, and you can add English phrases to `personality.toml` (`_en` keys).
 
 ---
 
-## Быстрый старт
+## Features
+
+- **Two modes**
+  - **Private chats** — replies only to people on your whitelist (and optionally to everyone not in your contacts).
+  - **Anonymous chat bot** (e.g. @AnonRuBot) — talks to random strangers and sends `/search` itself when a dialog ends.
+- **Several accounts at once** — each with its own settings, and either a shared or its own personality (see [Multiple accounts](#multiple-accounts)).
+- **Any model**: llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, DeepSeek, OpenAI — anything that speaks the OpenAI API. Plus the native Ollama API and DeepSeek Harness.
+- **Human-like behaviour**
+  - pauses before reading and waits until the other person finishes a burst of messages;
+  - "typing…" proportional to the reply length;
+  - splits "statement + question" into two messages;
+  - no trailing periods, no long dashes, no emoji and no robotic "I see, ...".
+- **Never goes silent**: if the model returns nothing or a dry "ok", it asks the model again; as a last resort, a fallback phrase.
+- **Understands anonymous-chat slang**: "м/д", "мд?", "м20", "го обмен".
+- **Remembers what is already known** about the other person (gender, age) and doesn't ask again.
+- **Sees photos, stickers, GIFs, videos and video messages** (optional, with a vision model), including view-once ones.
+- **Listens to voice and video messages**: speech is recognised locally (faster-whisper), nothing goes to the cloud.
+- **Reads files it receives** (text, code, .docx) and can send a file from its own folder.
+- **Remembers people**: keeps a note about each person and uses it in later conversations.
+- **Incoming calls**: can decline and write that you can't talk right now.
+- **Sends your own photos, videos, voice and video messages** from the `media/` folder (optional): you decide what can go right away and what to stall on.
+- **Steps aside for you**: if you write in a chat yourself, the bot stays quiet for a set time.
+- **Control** from the terminal (`./ub`) and from Saved Messages: pause, status, live instructions to the bot, mute a person.
+
+---
+
+## Quick start
 
 ```bash
 git clone https://github.com/<you>/tg-llm-userbot.git ~/tg-llm-userbot
@@ -41,84 +45,84 @@ cd ~/tg-llm-userbot
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-cp .env.example .env              # заполнить — см. ниже
-cp persona.example.md persona.md  # описать себя
+cp .env.example .env              # fill in — see below
+cp persona.example.md persona.md  # describe yourself
 
-.venv/bin/python userbot.py --test-harness   # проверить, что модель отвечает
-.venv/bin/python userbot.py                  # первый запуск: вход по номеру телефона
+.venv/bin/python userbot.py --test-harness   # check that the model answers
+.venv/bin/python userbot.py                  # first run: log in with your phone number
 ```
 
-Нужен **Python 3.11+** и `ffmpeg` (для голосовых, видео и отправки своих медиа).
+Requires **Python 3.11+** and `ffmpeg` (for voice messages, videos and sending your own media).
 
 ---
 
-## Настройка `.env` по шагам
+## Setting up `.env` step by step
 
-Все настройки — в файле `.env` рядом с `userbot.py`. Полный список с комментариями — в [`.env.example`](.env.example).
+All settings live in the `.env` file next to `userbot.py`. The full commented list is in [`.env.example`](.env.example).
 
-### Шаг 1. Ключи Telegram API
+### Step 1. Telegram API keys
 
-1. Открой https://my.telegram.org и войди по номеру телефона.
-2. **API development tools** → создай приложение (название и описание — любые).
-3. Скопируй **App api_id** и **App api_hash**:
+1. Open https://my.telegram.org and log in with your phone number.
+2. **API development tools** → create an application (any name and description).
+3. Copy **App api_id** and **App api_hash**:
 
 ```ini
 TG_API_ID=1234567
 TG_API_HASH=0123456789abcdef0123456789abcdef
 ```
 
-> Это ключи *приложения*, а не пароль. Но не публикуй их.
+> These are *application* keys, not a password. Still, don't publish them.
 
-### Шаг 2. Кому отвечать
+### Step 2. Who to reply to
 
-**Вариант A — личные чаты по белому списку:**
+**Option A — private chats with a whitelist:**
 ```ini
 ALLOW_USERS=@friend1, @friend2, 123456789, +380991234567
-ALLOW_NON_CONTACTS=0    # 1 = ещё и всем, кого нет в контактах
+ALLOW_NON_CONTACTS=0    # 1 = also everyone who isn't in your contacts
 ANON_BOT=
 ```
-Числовой id человека можно узнать у ботов вроде @userinfobot (переслав им его сообщение).
-Номер телефона (с `+`) работает, только если Telegram его тебе показывает: человек есть в контактах или открыл номер.
+You can find someone's numeric id via bots like @userinfobot (forward them a message from that person).
+A phone number (with `+`) works only if Telegram shows it to you: the person is in your contacts or has a public number.
 
-**Вариант B — анонимный чат:**
+**Option B — anonymous chat:**
 ```ini
-ANON_BOT=AnonRuBot      # username бота, без @
-AUTO_NEXT=1             # после конца диалога сам искать следующего
+ANON_BOT=AnonRuBot      # bot username, without @
+AUTO_NEXT=1             # look for the next partner after a dialog ends
 ```
-В этом режиме бот отвечает **только** в этом чате и игнорирует всех остальных. Перед запуском один раз зайди в бота вручную и пройди его регистрацию.
+In this mode the bot replies **only** in that chat and ignores everyone else. Before the first run, open the bot manually once and complete its registration.
 
-### Шаг 3. Модель
+### Step 3. Model
 
-Выбери один из вариантов и впиши его в `.env`.
+Pick one option and put it in `.env`.
 
 <details open>
-<summary><b>llama.cpp (llama-server)</b> — локально, максимум контроля</summary>
+<summary><b>llama.cpp (llama-server)</b> — local, maximum control</summary>
 
 ```ini
 ENGINE=llamacpp
 LLM_URL=http://127.0.0.1:8080/v1
-LLM_MODEL=local          # = --alias сервера; при одной модели почти не важно
+LLM_MODEL=local          # = the server's --alias; barely matters with a single model
 LLM_API_KEY=
 LLM_THINK=0
-LLM_VISION=0             # 1, если сервер запущен с --mmproj
+LLM_VISION=0             # 1 if the server runs with --mmproj
 ```
-Пример запуска сервера:
+Example server launch:
 ```bash
 llama-server -hf unsloth/Qwen3.5-9B-GGUF:Q4_K_M -ngl 99 -c 16384 -fa on --jinja --alias local
 ```
-`ENGINE=llamacpp` дополнительно шлёт параметры, которые понимает только llama-server (`top_k`, `min_p`, включение/выключение размышлений Qwen). Для других серверов ставь `ENGINE=openai`.
+`ENGINE=llamacpp` additionally sends parameters that only llama-server understands (`top_k`, `min_p`, toggling Qwen thinking). For other servers use `ENGINE=openai`.
 </details>
 
 <details>
 <summary><b>Ollama</b></summary>
 
-Через OpenAI-совместимый API (рекомендуется, работает и фото):
+Via the OpenAI-compatible API (recommended, photos work too):
 ```ini
 ENGINE=openai
 LLM_URL=http://127.0.0.1:11434/v1
 LLM_MODEL=qwen3:8b
 ```
-Или родной API Ollama (можно задать размер контекста):
+Or the native Ollama API (lets you set the context size):
 ```ini
 ENGINE=ollama
 OLLAMA_URL=http://127.0.0.1:11434
@@ -129,12 +133,12 @@ OLLAMA_THINK=0
 </details>
 
 <details>
-<summary><b>LM Studio / vLLM / другой локальный сервер</b></summary>
+<summary><b>LM Studio / vLLM / another local server</b></summary>
 
 ```ini
 ENGINE=openai
-LLM_URL=http://127.0.0.1:1234/v1    # LM Studio; vLLM обычно :8000/v1
-LLM_MODEL=имя-модели-из-сервера
+LLM_URL=http://127.0.0.1:1234/v1    # LM Studio; vLLM is usually :8000/v1
+LLM_MODEL=model-name-from-the-server
 ```
 </details>
 
@@ -161,7 +165,7 @@ LLM_API_KEY=sk-...
 </details>
 
 <details>
-<summary><b>OpenRouter</b> — сотни моделей по одному ключу</summary>
+<summary><b>OpenRouter</b> — hundreds of models with one key</summary>
 
 ```ini
 ENGINE=openai
@@ -177,528 +181,575 @@ LLM_API_KEY=sk-or-...
 ```ini
 ENGINE=dsh
 DEEPSEEK_API_KEY=sk-...
-BRIDGE_DSH_BIN=dsh       # или полный путь к бинарнику
+BRIDGE_DSH_BIN=dsh       # or the full path to the binary
 BRIDGE_PROFILE=headless
 ```
-Агент запускается в режиме `read-only` в папке `sandbox/`: текст от незнакомцев попадает в промпт, поэтому трогать машину ему нельзя.
+The agent runs `read-only` in the `sandbox/` folder: text from strangers ends up in the prompt, so it must not touch the machine.
 </details>
 
-Проверка — бот ответит на «привет, как дела?» и выйдет:
+Check — the bot answers "привет, как дела?" ("hi, how are you?") and exits:
 ```bash
 .venv/bin/python userbot.py --test-harness
 ```
 
 > [!TIP]
-> **Какую модель брать.** Чем больше, тем живее и послушнее. 7–9B часто путаются в ролях и игнорируют правила. Хороший выбор для 8 ГБ видеопамяти — MoE-модели вроде `Qwen3.x-30B/35B-A3B` в llama.cpp с `--n-cpu-moe`: они почти такие же быстрые, как 8B, но намного умнее. Облачные модели работают хорошо, но переписка уходит провайдеру.
+> **Which model to use.** Bigger is livelier and more obedient. 7–9B models often mix up roles and ignore rules. A good choice for 8 GB of VRAM is an MoE model like `Qwen3.x-30B/35B-A3B` in llama.cpp with `--n-cpu-moe`: almost as fast as an 8B, but much smarter. Cloud models work well, but your conversations go to the provider.
 
-### Шаг 4. О себе
+### Step 4. About you
 
 ```ini
-OWNER_GENDER=m     # m | f — как отвечать на «м/д»
+OWNER_GENDER=m     # m | f — how to answer "м/д" (male/female?)
 ```
-Всё остальное — в `persona.md` (см. ниже).
+Everything else goes into `persona.md` (see below).
 
-### Шаг 5. Поведение (можно не трогать)
+### Step 5. Behaviour (optional)
 
-| Переменная | По умолчанию | Что делает |
+| Variable | Default | What it does |
 |---|---|---|
-| `READ_DELAY_MIN` / `READ_DELAY_MAX` | `15` / `90` | пауза перед прочтением, сек (личные чаты) |
-| `TYPING_CHARS_PER_SECOND` | `5` | скорость «набора»: чем длиннее сообщение, тем дольше висит «печатает» перед отправкой |
-| `TYPING_MAX_SECONDS` | `30` | потолок «печатает» на одно сообщение, сек |
-| `TYPING_FIRST_SECONDS` / `TYPING_NEXT_SECONDS` | `-1` / `-1` | минимум «печатает» перед первым / каждым следующим сообщением ответа, сек; `-1` — авто по длине |
-| `MAX_REPLY_CHARS` | `230` | ответы длиннее обрезаются до первых предложений |
-| `QUIET_SECONDS` | `12` | ждать, пока собеседник допишет серию сообщений |
-| `TAKEOVER_MINUTES` | `30` | ты писал сам последние N минут — бот молчит |
-| `MAX_REPLIES_PER_HOUR` | `20` | лимит ответов в час на чат |
-| `HISTORY_MESSAGES` | `40` | сколько сообщений истории видит модель |
-| `DISCLOSURE_TEXT` | пусто | первое сообщение в каждом новом личном чате (предупреждение, что отвечает ИИ); пусто — сам не предупреждает, но на прямой вопрос «ты бот?» отвечает честно |
-| `NOTIFY` | `1` | дублировать ответы и ошибки в «Избранное» |
-| `ANON_MAX_REPLIES_PER_HOUR` | `60` | лимит в анонимном чате |
-| `ANON_HISTORY_MESSAGES` | `24` | история в анонимном чате |
-| `ANON_TAKEOVER_MINUTES` | `2` | пауза, если ты сам написал в анонимный чат |
-| `ANON_IDLE_MINUTES` | `6` | собеседник в анонимке молчит N минут после нашего сообщения — `/next` (`0` — выключить; обычные чаты не затрагивает) |
-| `ANON_DISCLOSURE_TEXT` | пусто | если задан — отправляется каждому новому анонимному собеседнику |
-| `CALLS` | `ignore` | входящие звонки: `ignore` — не трогать, `decline` — сбросить, `decline_text` — сбросить и написать, что не может говорить |
-| `CALL_DECLINE_MIN` / `CALL_DECLINE_MAX` | `4` / `12` | через сколько секунд сбрасывать звонок |
-| `TYPO_CHANCE` | `0.06` | доля ответов с опечаткой «как с телефона» (`0` — без опечаток) |
-| `TYPO_FIX_CHANCE` | `0.35` | доля опечаток, которые бот сразу исправляет сообщением `*слово` (`1` — всегда) |
-| `LLM_TEMP` | `0.7` | «креативность» модели |
-| `LLM_MAX_TOKENS` | `300` | максимум токенов в ответе |
-| `LLM_TIMEOUT_SECONDS` | `240` | сколько ждать ответа модели |
-| `LLM_PARALLEL` | `1` | сколько ответов модель считает одновременно на все аккаунты; остальные ждут очереди. `0` — без очереди (облачный API) |
-| `PERSONA` | — | личность из `personas/<имя>/` (обычно в `accounts/<аккаунт>/.env`, см. «Несколько аккаунтов») |
-| `TG_TIMEOUT_SECONDS` | `60` | таймаут запросов к Telegram |
-| `WORKER_MAX_SECONDS` | `900` | ответ «висит» дольше — снимается и один раз генерируется заново |
-| `MEMORY_SUMMARY_EVERY` | `10` | через сколько новых сообщений обновлять заметку о собеседнике |
+| `READ_DELAY_MIN` / `READ_DELAY_MAX` | `15` / `90` | pause before reading, seconds (private chats) |
+| `TYPING_CHARS_PER_SECOND` | `5` | "typing" speed: the longer the message, the longer "typing…" shows before sending |
+| `TYPING_MAX_SECONDS` | `30` | cap on "typing…" per message, seconds |
+| `TYPING_FIRST_SECONDS` / `TYPING_NEXT_SECONDS` | `-1` / `-1` | minimum "typing…" before the first / each next message of a reply, seconds; `-1` — automatic by length |
+| `MAX_REPLY_CHARS` | `230` | longer replies are cut to the first sentences |
+| `QUIET_SECONDS` | `12` | wait until the other person finishes a burst of messages |
+| `TAKEOVER_MINUTES` | `30` | you wrote yourself in the last N minutes — the bot stays quiet |
+| `MAX_REPLIES_PER_HOUR` | `20` | reply limit per hour per chat |
+| `HISTORY_MESSAGES` | `40` | how many history messages the model sees |
+| `DISCLOSURE_TEXT` | empty | first message in every new private chat (a notice that an AI is replying); empty — no notice, but a direct "are you a bot?" gets an honest answer |
+| `NOTIFY` | `1` | copy replies and errors to Saved Messages |
+| `ANON_MAX_REPLIES_PER_HOUR` | `60` | limit in the anonymous chat |
+| `ANON_HISTORY_MESSAGES` | `24` | history in the anonymous chat |
+| `ANON_TAKEOVER_MINUTES` | `2` | pause if you wrote in the anonymous chat yourself |
+| `ANON_IDLE_MINUTES` | `6` | the anonymous partner is silent for N minutes after our message — `/next` (`0` — off; private chats are not affected) |
+| `ANON_DISCLOSURE_TEXT` | empty | if set — sent to every new anonymous partner |
+| `CALLS` | `ignore` | incoming calls: `ignore` — leave alone, `decline` — decline, `decline_text` — decline and write that you can't talk |
+| `CALL_DECLINE_MIN` / `CALL_DECLINE_MAX` | `4` / `12` | after how many seconds to decline a call |
+| `TYPO_CHANCE` | `0.06` | share of replies with a "phone-style" typo (`0` — no typos) |
+| `TYPO_FIX_CHANCE` | `0.35` | share of typos the bot corrects right away with a `*word` message (`1` — always) |
+| `LLM_TEMP` | `0.7` | model "creativity" |
+| `LLM_MAX_TOKENS` | `300` | max tokens per reply |
+| `LLM_TIMEOUT_SECONDS` | `240` | how long to wait for the model |
+| `LLM_PARALLEL` | `1` | how many replies the model computes at once across all accounts; the rest wait in a queue. `0` — no queue (cloud API) |
+| `PERSONA` | empty | personality from `personas/<name>/` (usually set in `accounts/<account>/.env`, see [Multiple accounts](#multiple-accounts)) |
+| `TG_TIMEOUT_SECONDS` | `60` | timeout for Telegram requests |
+| `WORKER_MAX_SECONDS` | `900` | a reply "hanging" longer than this is dropped and regenerated once |
+| `MEMORY_SUMMARY_EVERY` | `10` | after how many new messages to update the note about a person |
 
-Для тестов удобно поставить `READ_DELAY_MIN=0`, `READ_DELAY_MAX=0`, `QUIET_SECONDS=0`.
+For testing, it's handy to set `READ_DELAY_MIN=0`, `READ_DELAY_MAX=0`, `QUIET_SECONDS=0`.
 
 ---
 
-## `persona.md` — кто ты
+## `persona.md` — who you are
 
-Модель знает о тебе **только** то, что написано в этом файле. Начни с шаблона:
+The model knows about you **only** what is written in this file. Start from the template:
 ```bash
 cp persona.example.md persona.md
 ```
 
-Что писать, чтобы бот звучал живо:
-- **Факты**: имя, возраст, город, работа/учёба, увлечения.
-- **Конкретные детали и истории** — главное. Не «люблю сериалы», а «пересматривал „Во все тяжкие“ два раза». Модель будет делиться ими в разговоре.
-- **Как ты пишешь** + 4–6 примеров твоих настоящих сообщений.
-- **Чего не говорить.**
+What to write so the bot sounds alive:
+- **Facts**: name, age, city, work/study, hobbies.
+- **Concrete details and stories** — the most important part. Not "I like TV shows" but "I've rewatched Breaking Bad twice". The model will share them in conversation.
+- **How you write** + 4–6 examples of your real messages.
+- **What not to say.**
 
-`persona.md` в `.gitignore` — твои данные не попадут в репозиторий.
+`persona.md` is in `.gitignore` — your data won't end up in the repository.
 
 ---
 
-## `personality.toml` — как бот себя ведёт
+## `personality.toml` — how the bot behaves
 
-`persona.md` — **кто ты** (факты о себе). `personality.toml` — **как бот общается**:
-правила, манера, готовые фразы. Начни с шаблона:
+`persona.md` is **who you are** (facts about you). `personality.toml` is **how the bot talks**:
+rules, manner, ready-made phrases. Start from the template:
 ```bash
 cp personality.example.toml personality.toml
 ```
-Если `personality.toml` нет, берётся `personality.example.toml`.
+If there is no `personality.toml`, `personality.example.toml` is used.
 
-| Ключ | Что это |
+| Key | What it is |
 |---|---|
-| `name` | имя, которым бот представляется |
-| `gender` | `m` / `f` — в каком роде пишет и что отвечает на «мд?» (иначе `OWNER_GENDER` из `.env`) |
-| `rules` | главный промпт: правила общения. Подстановки `{disclosure_note}` `{my_g}` `{my_g_note}` `{examples}` |
-| `style_examples` | примеры манеры «реплика собеседника \n мой ответ», в каждый чат берутся 3 случайных |
-| `hook_ideas` | чем оживить затухающий разговор |
-| `meet_deflect` | отмазки, когда зовут встретиться/созвониться |
-| `laughs` | реакция на смешной стикер |
-| `howru_short` / `howru_followup` | короткий ответ на «а у тебя как?» и вопрос после него |
-| `fallback_replies` | если модель дважды промолчала |
-| `already_answered` | собеседник повторяет вопрос, на который уже ответили |
-| `said_already` | модель упорно повторяет свой прошлый ответ |
-| `shady_refusals` | отказ, если зовут в мутное, а модель согласилась |
-| `snap_backs` | огрызнуться, если оскорбляют, а модель упорно соглашается («да, я тупая») |
-| `[now_activities]` | чем ты «занят сейчас» по времени суток — ответ на «что делаешь?» (необязательно) |
+| `name` | the name the bot introduces itself with |
+| `gender` | `m` / `f` — grammatical gender of its messages and the answer to "мд?" (otherwise `OWNER_GENDER` from `.env`) |
+| `rules` | the main prompt: conversation rules. Placeholders `{disclosure_note}` `{my_g}` `{my_g_note}` `{examples}` |
+| `style_examples` | manner examples "their line \n my reply"; 3 random ones go into each chat |
+| `hook_ideas` | how to revive a fading conversation |
+| `meet_deflect` | excuses when asked to meet / call |
+| `laughs` | reaction to a funny sticker |
+| `howru_short` / `howru_followup` | short answer to "and how are you?" and the question after it |
+| `fallback_replies` | if the model stayed silent twice |
+| `already_answered` | the other person repeats a question that was already answered |
+| `said_already` | the model keeps repeating its previous reply |
+| `shady_refusals` | refusal when invited into something shady and the model agreed |
+| `snap_backs` | snap back when insulted and the model keeps agreeing ("yes, I'm stupid") |
+| `[now_activities]` | what you're "doing now" by time of day — the answer to "what are you up to?" (optional) |
 
-У ключей с фразами можно задать английский вариант с суффиксом `_en` (`laughs_en`,
-`fallback_replies_en` и т. д.) — он используется, когда собеседник пишет по-английски.
-Обязательны все ключи от `name` до `howru_followup`, кроме `gender`. Фразы
-`fallback_replies` … `snap_backs` можно не указывать — тогда берутся значения по умолчанию из кода.
+Phrase keys can have an English variant with the `_en` suffix (`laughs_en`,
+`fallback_replies_en`, etc.) — used when the other person writes in English.
+All keys from `name` to `howru_followup` are required, except `gender`. The phrases
+`fallback_replies` … `snap_backs` are optional — defaults from the code are used otherwise.
 
-Фразы из этого файла бот шлёт как есть, без модели, — пиши их в своём роде.
+The bot sends phrases from this file as is, without the model — write them in your own grammatical gender.
 
-`personality.toml` в `.gitignore`.
+`personality.toml` is in `.gitignore`.
 
 ---
 
-## Вход в аккаунт
+## Logging in
 
-**Обычный способ** — при первом запуске `userbot.py` спросит номер, код из Telegram и облачный пароль (если включён).
+**The usual way** — on the first run `userbot.py` asks for your number, the code from Telegram and the cloud password (if enabled).
 
-**Без интерактивного ввода** (например, на сервере):
+**Non-interactive** (e.g. on a server):
 ```bash
-.venv/bin/python login.py +79991234567     # придёт код в Telegram
+.venv/bin/python login.py +79991234567     # a code arrives in Telegram
 .venv/bin/python login.py code 12345
-.venv/bin/python login.py password 'облачный пароль'   # только если включена 2FA
+.venv/bin/python login.py password 'cloud password'   # only if 2FA is on
 ```
 
-**По QR-коду**: `.venv/bin/python qr_login.py` → в Telegram на телефоне: Настройки → Устройства → Подключить устройство.
+**With a QR code**: `.venv/bin/python qr_login.py` → in Telegram on your phone: Settings → Devices → Link Desktop Device.
 
-Сессия сохраняется в `state/account.session`.
+The session is stored in `state/account.session`.
 
 > [!CAUTION]
-> `state/account.session` — это **полный доступ к твоему аккаунту**, без пароля и 2FA. Не отправляй его никому и не коммить (он в `.gitignore`). Утёк — Настройки → Устройства → завершить сеанс.
+> `state/account.session` is **full access to your account**, with no password or 2FA. Never send it to anyone or commit it (it's in `.gitignore`). If it leaks — Settings → Devices → terminate the session.
 
-### Несколько аккаунтов
+### Multiple accounts
 
-Можно подключить сколько угодно аккаунтов. Отвечают все сразу, личность по умолчанию общая (см. ниже, как дать аккаунту свою).
+You can connect as many accounts as you like — they all reply at the same time, each in its own process.
+
+- **`main`** — the main account: no flag, files in the root (`.env`, `state/`). Optional.
+- **Others** — with the `-a <name>` flag, files in `accounts/<name>/`.
 
 ```bash
-.venv/bin/python login.py -a work +79991234567   # -a <имя> — у каждого шага входа
+.venv/bin/python login.py -a work +79991234567   # -a <name> on every login step
 .venv/bin/python login.py -a work code 12345
-.venv/bin/python qr_login.py -a work             # или по QR
+.venv/bin/python login.py -a work password '...' # only if 2FA is on
+.venv/bin/python qr_login.py -a work             # or via QR
 ```
 
-Вход создаёт папку `accounts/work/`: `state/` внутри неё — сессия, память о собеседниках и лог этого аккаунта.
-Нынешний аккаунт называется `main` и живёт, как раньше, в корне (`.env`, `state/`).
+Logging in creates the account folder:
+```
+userbot/
+├── .env                  ← shared settings (and main's settings)
+├── persona.md            ← shared personality
+├── personality.toml
+├── media/
+├── state/                ← main: login, memory, log
+├── accounts/
+│   └── work/
+│       ├── .env          ← (optional) only the differences from the shared .env
+│       ├── personality.toml, persona.md, media/   ← (optional) own personality
+│       └── state/        ← work: login, memory, log
+└── personas/
+    └── katya/            ← (optional) a personality for several accounts
+```
 
-Корневой `.env` общий. Чтобы у аккаунта были свои настройки, положи в `accounts/<имя>/.env` только отличия:
+**Settings.** Without its own `.env`, an account takes everything from the root `.env` and behaves like `main`.
+You create `accounts/<name>/.env` by hand and put **only the differences** in it — for example,
+one account replies to strangers and another doesn't:
 ```ini
+# accounts/work/.env
+ALLOW_NON_CONTACTS=1
 ALLOW_USERS=@friend1,@friend2
-ANON_BOT=
 ```
+An empty value counts too: `ALLOW_USERS=` means an empty whitelist even if the root one is filled in.
+Set the Telegram keys, the model and `LLM_PARALLEL` only in the root `.env`.
 
-**Личность аккаунта.** `persona.md`, `personality.toml` и папка `media/` ищутся по очереди
-(каждый файл отдельно, берётся первый найденный):
+**Personality.** Shared by default. `persona.md`, `personality.toml` and `media/` are looked up in order —
+each one separately, the first found wins:
 
-1. `personas/<имя>/` — если в `accounts/<аккаунт>/.env` задано `PERSONA=<имя>`. Такую личность могут делить несколько аккаунтов.
-2. `accounts/<аккаунт>/` — своя личность только этого аккаунта.
-3. корень — общая личность.
+1. `personas/<name>/` — if the account's `.env` has `PERSONA=<name>`. Several accounts can share such a personality.
+2. `accounts/<account>/` — a personality for this account only.
+3. the root — the shared personality.
 
-Например, чтобы у `work` было своё имя и манера, но та же биография: положи только
-`accounts/work/personality.toml`, а `persona.md` останется общим. Откуда что взято, показывает `status`.
-Память о собеседниках у каждого аккаунта своя всегда.
+You can override just part of it: e.g. put only `personality.toml` into `accounts/work/`
+(own name and manner) while the `persona.md` biography stays shared. `status` shows where each part comes from.
 
-`./run.sh` запускает все аккаунты, где выполнен вход (или только перечисленные: `./run.sh main work`), каждый — отдельным процессом.
-Модель локальная одна на всех, поэтому одновременно она считает не больше `LLM_PARALLEL` ответов (по умолчанию 1), остальные аккаунты ждут очереди.
+> [!WARNING]
+> If an account has its own personality but no `media/` of its own, it will send photos and voice messages from the shared one.
+> Give it its own `media/` or turn media off: `MEDIA_SEND=` in its `.env`.
+
+Each account always has its own login and memory about people. The `files/` folder is shared
+(set a separate one with `FILES_DIR=` in the account's `.env`).
+
+**Running.** `./run.sh` finds and starts every account you've logged into (or only the listed ones:
+`./run.sh main work`); if one crashes, the others keep working. The `-a` flag is only needed
+for logging in and for manual commands (`userbot.py -a work`, `./ub -a work status`).
+
+**Model queue.** There is one model for everyone, so it computes at most `LLM_PARALLEL` replies
+at once (1 by default); other accounts wait in a queue (the log says
+`[llm] модель занята… жду в очереди` — "model busy, waiting in queue"). For a cloud API use `LLM_PARALLEL=0` — no queue.
+
+**Without a main account.** If the root has no login, `run.sh` and `ub` work only with `accounts/`.
+The root `.env` is still needed (shared settings). Don't run `login.py` without `-a` — it would log
+into `main`. To turn the current `main` into a named account (with the bot stopped):
+`mkdir -p accounts/<name> && mv state accounts/<name>/state && mkdir state`.
 
 ---
 
-## Запуск
+## Running
 
 ```bash
-./run.sh                       # бот в фоне с автоперезапуском + консоль ub (см. «Управление»)
-.venv/bin/python userbot.py    # или просто так: лог в терминал, без автоперезапуска
+./run.sh                       # bot in the background with auto-restart + the ub console (see "Control")
+.venv/bin/python userbot.py    # or just like this: log to the terminal, no auto-restart
 ```
 
-Автозапуск через systemd (пользовательский сервис):
+Autostart with systemd (user service):
 ```bash
-# поправь путь в userbot.service, если клонировал не в ~/tg-llm-userbot
+# fix the path in userbot.service if you didn't clone into ~/tg-llm-userbot
 cp userbot.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now userbot
-journalctl --user -u userbot -f      # логи
+journalctl --user -u userbot -f      # logs
 ```
 
-Несколько аккаунтов под systemd — шаблон `userbot@.service` (вместо `userbot.service`):
+Several accounts under systemd — the `userbot@.service` template (instead of `userbot.service`):
 ```bash
 cp userbot@.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now userbot@main userbot@work
 ```
 
-Запустить можно только один экземпляр на аккаунт (`state/userbot.lock`). `send.py` и `login.py` не запускай, пока работает бот: у них общий файл сессии.
+Only one instance per account can run (`state/userbot.lock`). Don't run `send.py` or `login.py` while the bot is running: they share the session file.
 
 ---
 
-## Управление
+## Control
 
-### Программа `ub`
+### The `ub` program
 
-Если аккаунтов несколько, `ub` работает с одним из них за раз (имя видно в приглашении: `ub[work]>`):
-`accounts` — список и кто запущен, `use work` — переключиться, `all pause` / `all status` — команда сразу всем,
-`./ub -a work status` — одна команда конкретному аккаунту.
-
-`./run.sh` запускает бота в фоне и сразу открывает `ub` — строку команд. Лог бота на экран
-не лезет: он пишется в `state/userbot.log` (каждый запуск — новый лог, предыдущий — в
-`userbot.log.1`), а посмотреть его можно командой `logs`
-(Ctrl+C — обратно в `ub`). Если бот перезапустится (watchdog), `ub` переподключится сам.
+`./run.sh` starts the bot in the background and immediately opens `ub` — a command line. The bot's log
+doesn't clutter the screen: it goes to `state/userbot.log` (for other accounts — `accounts/<name>/state/userbot.log`;
+every start gets a new log, the previous one moves to `userbot.log.1`), and you can view it with `logs`
+(Ctrl+C — back to `ub`). If the bot restarts (watchdog), `ub` reconnects by itself.
 
 ```
 $ ./run.sh
 бот работает. help — команды, logs — лог бота, exit — остановить бота
-ub> chats                     # последние чаты с номерами
- 1. Маша (@masha) 📝 (2) — а ты чем занята?
-ub> open 1                    # открыть чат: переписка + новые сообщения вживую
-[09.11 23:41] ← Маша: привет
+ub> chats                     # recent chats with numbers
+ 1. Masha (@masha) 📝 (2) — а ты чем занята?
+ub> open 1                    # open a chat: history + new messages live
+[09.11 23:41] ← Masha: привет
 [09.11 23:41] → бот: привет) как дела?
 [09.11 23:42] ✎ ты: это я сам
-ub[Маша (@masha)]> tell переведи разговор на концерт в субботу
-ub[Маша (@masha)]> logs       # лог бота, как раньше в run.sh; Ctrl+C — назад
-ub[Маша (@masha)]> exit       # остановить бота
+ub[Masha (@masha)]> tell steer the conversation to the concert on Saturday
+ub[Masha (@masha)]> logs      # bot log; Ctrl+C — back
+ub[Masha (@masha)]> exit      # stop the bot
 ```
+(`←` the other person, `→ бот` the bot, `✎ ты` you.)
 
-- `./ub` — подключиться к уже запущенному боту из **другого** терминала (там `exit` закрывает
-  только `ub`, бот работает дальше). `./ub status` — одна команда и выход.
-- `./run.sh --log` — старый режим: без `ub`, весь лог прямо в терминал. Так же `run.sh` ведёт
-  себя без терминала (nohup, `> file`). Под systemd `./ub` тоже работает, но лог там —
-  `journalctl --user -u userbot -f`, а не `logs`.
+- `./ub` — connect to an already running bot from **another** terminal (there `exit` closes
+  only `ub`, the bot keeps running). `./ub status` — one command and exit.
+- **Several accounts**: `ub` works with one account at a time (its name is in the prompt:
+  `ub[work]>`, and `logs` shows its log). `accounts` — list and which are running, `use work` —
+  switch, `all <command>` — run on all at once (`all pause`, `all restart`), `./ub -a work status` —
+  one command for a specific account. `restart` restarts only the current account: after changing
+  code, the shared `.env` or the shared personality use `all restart` (each one waits for its own replies).
+- `./run.sh --log` — the old mode: no `ub`, the whole log straight to the terminal. `run.sh` also
+  behaves like this without a terminal (nohup, `> file`). Under systemd `./ub` works too, but the log is
+  `journalctl --user -u userbot -f`, not `logs`.
 
-| Команда | Действие |
+| Command | Action |
 |---|---|
-| `help [команда]` | список команд / подробно про одну |
-| `status` | пауза, белый список, заглушённые, указания, кто сейчас «думает» |
-| `chats [n]` | последние личные чаты с номерами (📝 — есть указание, 💭 — бот думает, 🔇 — заглушён) |
-| `open <кто>` / `close` | открыть чат: история + новые сообщения вживую (← он, → бот, ✎ ты). `<кто>` — `@ник`, ник или имя без @ (как в `ls`, можно начало: `open alex`), номер из `ls`, id. То же — `cd <кто>`; `cd` / `cd ..` — закрыть |
-| `history [кто] [n]` | последние n сообщений (по умолчанию 20) |
-| `tell [кто] <текст>` | указание боту: тема, вопрос, «скинь фото кота» |
-| `forget [кто]` | отменить указание |
-| `note [кто] [текст]` | память о человеке: запомнить / исправить / забыть факт или постоянную установку; собеседнику ничего не уходит. Без текста — показать память |
-| `write [кто] <текст>` | написать сообщение от себя (бот уступит чат на `TAKEOVER_MINUTES`) |
-| `send [кто] <файл>` | сразу отправить медиа из `media/`, без модели |
-| `media` | список медиа с описаниями |
-| `restart [cancel]` | перезапустить бота, когда он допишет текущие ответы (после правок `.env`, `personality.toml`, кода) |
-| `pause` / `resume` | остановить / включить автоответы; после `resume` бот ответит на непрочитанное за время паузы (не старше суток) |
-| `mute [кто]` / `unmute [кто]` | не отвечать конкретному человеку |
-| `accounts` | список аккаунтов: какие запущены, какой текущий |
-| `use <имя>` | переключить `ub` на другой аккаунт |
-| `all <команда>` | выполнить команду на всех запущенных аккаунтах (`all pause`, `all status`) |
-| `logs [n]` | режим просмотра лога текущего аккаунта: последние n строк (по умолчанию 40) и новые вживую; Ctrl+C — назад |
-| `clear` | очистить экран |
-| `exit` | из `./run.sh` — остановить ботов всех аккаунтов; из `./ub` — только выйти (Ctrl+D — то же) |
+| `help [command]` | list of commands / details about one |
+| `status` | pause, account and personality, whitelist, muted, instructions, who is "thinking" now |
+| `chats [n]` | recent private chats with numbers (📝 — has an instruction, 💭 — bot is thinking, 🔇 — muted) |
+| `open <who>` / `close` | open a chat: history + new messages live (← them, → bot, ✎ you). `<who>` — `@nick`, nick or name without @ (as in `ls`, a prefix works: `open alex`), number from `ls`, id. Same as `cd <who>`; `cd` / `cd ..` — close |
+| `history [who] [n]` | last n messages (20 by default) |
+| `tell [who] <text>` | instruction for the bot: a topic, a question, "send a photo of the cat" |
+| `forget [who]` | cancel the instruction |
+| `note [who] [text]` | memory about a person: remember / correct / forget a fact or a standing directive; nothing is sent to them. Without text — show the memory |
+| `write [who] <text>` | send a message yourself (the bot yields the chat for `TAKEOVER_MINUTES`) |
+| `send [who] <file>` | send media from `media/` right away, without the model |
+| `media` | list of media with descriptions |
+| `restart [cancel]` | restart the bot (current account) once it finishes the current replies (after changing `.env`, `personality.toml`, code); all accounts — `all restart` |
+| `pause` / `resume` | stop / resume auto-replies; after `resume` the bot answers what came in during the pause (no older than a day) |
+| `mute [who]` / `unmute [who]` | don't reply to a specific person |
+| `accounts` | list of accounts: which are running, which is current |
+| `use <name>` | switch `ub` to another account |
+| `all <command>` | run a command on all running accounts (`all pause`, `all status`) |
+| `logs [n]` | view the current account's log: last n lines (40 by default) and new ones live; Ctrl+C — back |
+| `clear` | clear the screen |
+| `exit` | from `./run.sh` — stop the bots of all accounts; from `./ub` — just leave (Ctrl+D — same) |
 
-`<кто>` — `@username`, числовой id, номер из `chats` или `anon` (анонимный чат). Если чат
-открыт через `open`, `<кто>` можно не писать. Работают Tab-дополнение и история команд (↑/↓);
-Ctrl+C стирает строку, а в открытом чате с пустой строкой — закрывает чат (как `close`). Можно открыть несколько `ub` одновременно — например, в каждом свой чат.
+`<who>` — `@username`, numeric id, a number from `chats` or `anon` (the anonymous chat). If a chat
+is opened with `open`, you can omit `<who>`. Tab completion and command history (↑/↓) work;
+Ctrl+C clears the line, and in an open chat with an empty line it closes the chat (like `close`). You can open several `ub` at once — e.g. a different chat in each.
 
-### Из Telegram: «Избранное»
+### From Telegram: Saved Messages
 
-Те же команды можно писать в **«Избранное»** (Saved Messages) с префиксом `.ub`:
-`.ub help`, `.ub status`, `.ub tell @masha …`, `.ub send @masha cat.jpg` и т. д.
-Только команды `ub` (`open`, `close`, `logs`, `clear`, `exit`) там не работают.
+The same commands can be written in **Saved Messages** with the `.ub` prefix:
+`.ub help`, `.ub status`, `.ub tell @masha …`, `.ub send @masha cat.jpg` etc.
+Only the `ub`-specific commands (`open`, `close`, `logs`, `clear`, `exit`) don't work there.
 
-Если ты сам пишешь в чат, бот это замечает и на `TAKEOVER_MINUTES` уступает тебе.
+If you write in a chat yourself, the bot notices and yields to you for `TAKEOVER_MINUTES`.
 
-### Память о человеке: `note`
+### Memory about a person: `note`
 
-`tell` — разовое указание, после которого бот пишет. `note` — правка того, что бот **помнит** о
-человеке (`state/contacts/<id>.md`): он ничего не отправляет и учтёт это в следующих ответах.
+`tell` is a one-off instruction after which the bot writes. `note` edits what the bot **remembers** about
+a person (`state/contacts/<id>.md`): it sends nothing and takes it into account in later replies.
 
 ```
 ub> open @masha
-ub[Маша (@masha)]> note она не Аня, а Андрей
-ub[Маша (@masha)]> note забудь, что ему нравится аниме
-ub[Маша (@masha)]> note настойчивее пытайся узнать его фамилию
-ub[Маша (@masha)]> note          # показать, что бот о нём помнит
+ub[Masha (@masha)]> note she's not Anya, he's Andrey
+ub[Masha (@masha)]> note forget that he likes anime
+ub[Masha (@masha)]> note try harder to find out his surname
+ub[Masha (@masha)]> note          # show what the bot remembers about them
 ```
 
-- Пишешь своими словами — модель сама исправит заметку из переписки и запишет сказанное тобой в
-  отдельный раздел «От владельца». Он главнее заметки и имени в Telegram, автосводка его не затирает.
-- Действует постоянно и переживает перезапуск. Отменить — тоже словами: `note забудь про фамилию`.
-- Без открытого чата: `note @masha …`; из «Избранного»: `.ub note @masha …`. В анонимном чате памяти нет.
-- Файл можно править и руками — он перечитывается на каждый ответ.
+- Write in your own words — the model corrects the note from the conversation itself and records what you said in a
+  separate "From the owner" section. It takes priority over the note and the Telegram name, and auto-summaries don't overwrite it.
+- It's permanent and survives restarts. To undo, also use words: `note forget about the surname`.
+- Without an open chat: `note @masha …`; from Saved Messages: `.ub note @masha …`. There's no memory in the anonymous chat.
+- You can edit the file by hand too — it's re-read on every reply.
 
-### Указания на ходу: `.ub tell`
+### Live instructions: `.ub tell`
 
-Пока бот переписывается, можно подсказать ему из «Избранного», не влезая в чат:
+While the bot is chatting, you can nudge it from Saved Messages without stepping into the chat:
 
 ```
-.ub tell @masha переведи разговор на концерт в субботу
-.ub tell @masha спроси, как она сдала экзамен
-.ub tell @masha скинь ей фото кота
-.ub tell anon скажи, что тебе пора идти
+.ub tell @masha steer the conversation to the concert on Saturday
+.ub tell @masha ask how her exam went
+.ub tell @masha send her a photo of the cat
+.ub tell anon say you have to go
 ```
 
-- Собеседник указание не видит: бот выполняет его своими словами, как будто сам решил.
-- Если собеседник молчит — бот пишет ему сам, сразу (без паузы на «прочтение»).
-- Если бот как раз думает над ответом — недописанный ответ выбрасывается и генерируется
-  заново уже с указанием (как если бы ты дописал сообщение, пока он думает).
-- Новое указание заменяет старое. Выполненное снимается само (в «Избранное» придёт ✅),
-  невыполненное забывается через 30 минут.
-- По указанию медиа отправляется даже при `MEDIA_SELF=0` и выключенном `MEDIA_SEND`,
-  и сразу — без «потянуть время». Для точной отправки конкретного файла без модели — `.ub send`.
+- The other person doesn't see the instruction: the bot carries it out in its own words, as if it decided to.
+- If the other person is silent, the bot writes to them itself, right away (no "reading" pause).
+- If the bot is in the middle of a reply, the unfinished reply is thrown away and regenerated
+  with the instruction (as if you added a message while it was thinking).
+- A new instruction replaces the old one. A fulfilled one is removed automatically (you get ✅ in Saved Messages),
+  an unfulfilled one is forgotten after 30 minutes.
+- On instruction, media is sent even with `MEDIA_SELF=0` and `MEDIA_SEND` off,
+  and right away — no stalling. To send a specific file exactly, without the model — `.ub send`.
 
 ---
 
-## Фото (vision)
+## Photos (vision)
 
-Если модель умеет видеть картинки, бот передаёт ей последние 2 фото собеседника (уменьшенные до 768 px):
+If the model can see images, the bot passes it the other person's last 2 photos (downscaled to 768 px):
 ```ini
 LLM_VISION=1
 ```
-- **llama.cpp**: сервер должен быть запущен с `--mmproj файл-mmproj.gguf` (для `-hf` скачивается сам).
-- **Облако / Ollama /v1**: выбери модель с поддержкой изображений.
+- **llama.cpp**: the server must run with `--mmproj mmproj-file.gguf` (downloaded automatically with `-hf`).
+- **Cloud / Ollama /v1**: choose a model with image support.
 
-Без `LLM_VISION=1` модель видит только пометку «[фото]» и знает, что содержимое ей неизвестно.
+Without `LLM_VISION=1` the model only sees a "[photo]" marker and knows it can't see the content.
 
-Так же модель видит стикеры и гифки (один кадр), видео и кружочки (`VIDEO_FRAMES` кадров одной
-картинкой-сеткой; видео тяжелее `VIDEO_MAX_MB` — только превью). Одноразовые фото/видео бот
-смотрит и после ответа «открывает» — они сгорают, как если бы ты открыл их сам.
+The model also sees stickers and GIFs (one frame), videos and video messages (`VIDEO_FRAMES` frames as one
+grid image; videos heavier than `VIDEO_MAX_MB` — preview only). The bot views view-once photos/videos
+and "opens" them after replying — they burn, as if you opened them yourself.
 
 ---
 
-## Голосовые и кружочки собеседника
+## The other person's voice and video messages
 
-Речь распознаётся локально через `faster-whisper` (CPU, нужен `ffmpeg`); модель получает текст и
-отвечает, как будто послушала. Расшифровки кэшируются в `state/voice_cache.json`.
+Speech is recognised locally with `faster-whisper` (CPU, needs `ffmpeg`); the model gets the text and
+replies as if it listened. Transcripts are cached in `state/voice_cache.json`.
 
-| Переменная | По умолчанию | Что делает |
+| Variable | Default | What it does |
 |---|---|---|
-| `WHISPER_MODEL` | `small` | `tiny` / `base` / `small` / `medium` / `large-v3`; пусто или `0` — выключить |
-| `WHISPER_THREADS` | `4` | потоков CPU |
-| `WHISPER_LANGUAGE` | пусто | `ru` / `uk` / `en`; пусто — определять автоматически |
-| `VOICE_MAX_SECONDS` | `300` | голосовые длиннее бот «не слушает» |
+| `WHISPER_MODEL` | `small` | `tiny` / `base` / `small` / `medium` / `large-v3`; empty or `0` — off |
+| `WHISPER_THREADS` | `4` | CPU threads |
+| `WHISPER_LANGUAGE` | empty | `ru` / `uk` / `en`; empty — auto-detect |
+| `VOICE_MAX_SECONDS` | `300` | the bot "doesn't listen" to longer voice messages |
 
-При первом запуске модель whisper скачивается сама. Если распознавание выключено, бот просит написать текстом.
-
----
-
-## Файлы
-
-Присланные текстовые файлы (`.txt`, `.md`, код, `.csv`, `.docx` и т. п., до 300 КБ) модель читает и
-отвечает по содержимому. Из папки `FILES_DIR` (по умолчанию `files/` рядом с ботом) бот может
-отправить файл, если собеседник попросит, и туда же сохраняет текстовые файлы, которые создал сам.
-Клади в эту папку только то, что не жалко отдать любому, кому бот отвечает. `FILES_SEND=0` выключает
-отправку и создание файлов совсем (присланные файлы бот читает по-прежнему).
+The whisper model downloads itself on the first run. If recognition is off, the bot asks to write in text.
 
 ---
 
-## Память о собеседниках
+## Files
 
-Для каждого личного чата бот ведёт файл `state/contacts/<id>.md`: короткая заметка «что я о нём знаю»
-(её пишет модель каждые `MEMORY_SUMMARY_EVERY` новых сообщений) и лог переписки. Заметка попадает в
-промпт, поэтому бот не переспрашивает уже известное. Файл можно править руками или удалить — тогда
-память об этом человеке начнётся заново. В анонимном чате память не ведётся.
+Received text files (`.txt`, `.md`, code, `.csv`, `.docx` etc., up to 300 KB) are read by the model and
+it replies based on their content. From the `FILES_DIR` folder (`files/` next to the bot by default) the bot can
+send a file if asked, and it saves text files it creates there.
+Put only what you don't mind giving to anyone the bot replies to into this folder. `FILES_SEND=0` turns off
+sending and creating files entirely (received files are still read).
 
 ---
 
-## Свои фото, видео, голосовые и кружочки
+## Memory about people
 
-Бот может отправлять собеседнику твои готовые фото, видео, голосовые и кружочки.
-По умолчанию выключено.
+For every private chat the bot keeps a file `state/contacts/<id>.md`: a short "what I know about them" note
+(written by the model every `MEMORY_SUMMARY_EVERY` new messages) and the conversation log. The note goes into
+the prompt, so the bot doesn't ask about what it already knows. You can edit or delete the file by hand — then
+the memory about that person starts over. No memory is kept in the anonymous chat.
 
-### Настройки в `.env`
+---
 
-| Переменная | По умолчанию | Что делает |
+## Your own photos, videos, voice and video messages
+
+The bot can send the other person your ready-made photos, videos, voice and video messages.
+Off by default.
+
+### Settings in `.env`
+
+| Variable | Default | What it does |
 |---|---|---|
-| `MEDIA_SEND` | пусто (выключено) | что можно отправлять, через запятую: `photo`, `video`, `voice`, `round` или `all` |
-| `MEDIA_SELF` | `0` | `0` — только когда собеседник сам просит; `1` — может отправить и сам, когда к месту |
-| `MEDIA_DIR` | `media/` рядом с ботом | папка с медиа |
-| `MEDIA_LATER_MIN` / `MEDIA_LATER_MAX` | `10` / `60` | для «потянуть время»: через сколько минут отправить, случайно в этом диапазоне |
+| `MEDIA_SEND` | empty (off) | what may be sent, comma-separated: `photo`, `video`, `voice`, `round` or `all` |
+| `MEDIA_SELF` | `0` | `0` — only when the other person asks; `1` — may also send on its own when it fits |
+| `MEDIA_DIR` | `media/` next to the bot | media folder |
+| `MEDIA_LATER_MIN` / `MEDIA_LATER_MAX` | `10` / `60` | for "stall": after how many minutes to send, random within the range |
 
 ```
-MEDIA_SEND=all            # всё
-MEDIA_SEND=photo,voice    # только фото и голосовые
-MEDIA_SEND=               # выключено
+MEDIA_SEND=all            # everything
+MEDIA_SEND=photo,voice    # only photos and voice messages
+MEDIA_SEND=               # off
 ```
 
-### Куда класть файлы
+### Where to put files
 
 ```
 media/
-├── media.toml        описания файлов (что на них)
-├── photo/            фото: .jpg .png .webp
-│   └── later/        фото, с которыми надо потянуть время
-├── video/            видео: .mp4 .mov .webm .mkv
+├── media.toml        file descriptions (what's on them)
+├── photo/            photos: .jpg .png .webp
+│   └── later/        photos to stall on
+├── video/            videos: .mp4 .mov .webm .mkv
 │   └── later/
-├── voice/            голосовые: .ogg/.opus как есть; .mp3 .m4a .wav сконвертируются
+├── voice/            voice: .ogg/.opus as is; .mp3 .m4a .wav get converted
 │   └── later/
-└── round/            кружочки: любое видео, обрежется в квадрат 384×384, до 60 сек
+└── round/            video messages: any video, cropped to a 384×384 square, up to 60 s
     └── later/
 ```
 
-Папка `media/` в `.gitignore` — твои файлы в репозиторий не попадут.
+The `media/` folder is in `.gitignore` — your files won't get into the repository.
 
-### Описания: `media/media.toml`
+### Descriptions: `media/media.toml`
 
-Бот **сам файлы не смотрит и не слушает** — он знает о них только то, что написано
-в `media/media.toml`. По этим описаниям модель решает, что подходит к разговору.
-Полный шаблон с комментариями — `media.example.toml`.
+The bot **doesn't look at or listen to the files itself** — it knows only what's written
+in `media/media.toml`. Based on these descriptions the model decides what fits the conversation.
+The full commented template is `media.example.toml`.
 
 ```toml
 [[media]]
-file  = "photo/cat.jpg"                  # путь от папки media/ (или просто имя файла)
-about = "мой рыжий кот спит на подоконнике"
-when  = "now"                            # можно отправить сразу
+file  = "photo/cat.jpg"                  # path from the media/ folder (or just the file name)
+about = "my ginger cat sleeping on the windowsill"
+when  = "now"                            # may be sent right away
 
 [[media]]
 file  = "photo/later/selfie.jpg"
-about = "моё селфи в зеркале, в чёрной худи"
-when  = "later"                          # потянуть время
-delay = [20, 90]                         # отправить через 20–90 минут
+about = "my mirror selfie in a black hoodie"
+when  = "later"                          # stall
+delay = [20, 90]                         # send after 20–90 minutes
 
 [[media]]
 file  = "voice/bus.ogg"
-about = "говорю: «привет, я щас в автобусе, не могу писать»"   # для голосовых — дословно
+about = "I say: 'hi, I'm on the bus, can't text'"   # for voice — word for word
+when  = "now"
 
 [[media]]
 file  = "round/old.mp4"
-about = "старый кружок"
-when  = "never"                          # не отправлять
+about = "an old video message"
+when  = "never"                          # don't send
 ```
 
-| Поле | Что значит |
+| Field | Meaning |
 |---|---|
-| `file` | путь к файлу от `media/` или просто имя файла (обязательно) |
-| `about` | что на фото/видео или что ты говоришь в голосовом/кружке. Без него бот знает только имя файла |
-| `when` | `now` — сразу, когда просят или к месту (по умолчанию); `later` — потянуть время; `never` — не отправлять |
-| `delay` | для `later`: `[мин, макс]` минут до отправки (иначе `MEDIA_LATER_MIN/MAX`) |
+| `file` | path to the file from `media/` or just the file name (required) |
+| `about` | what's in the photo/video or what you say in the voice/video message. Without it the bot knows only the file name |
+| `when` | `now` — right away when asked or when it fits (default); `later` — stall; `never` — don't send |
+| `delay` | for `later`: `[min, max]` minutes until sending (otherwise `MEDIA_LATER_MIN/MAX`) |
 
-Файл без записи в `media.toml` тоже работает: описание = имя файла, `when` = `now`
-(или `later`, если он лежит в подпапке `later/`).
+A file without an entry in `media.toml` works too: description = file name, `when` = `now`
+(or `later` if it's in a `later/` subfolder).
 
-### Как это выглядит
+### How it looks
 
-- **Только по просьбе** (`MEDIA_SELF=0`, по умолчанию) — бот сам ничего не предлагает. Просьбу
-  («скинь фотку», «запиши гс», «покажи кота», «есть фото?», «send a pic») проверяет код, а не
-  только модель: без просьбы медиа не уйдёт, даже если модель решит отправить. И уходит только
-  тот вид, который просили: просят голосовое — фото не отправится.
-- **Сразу** (`now`) — отправляет на первую же просьбу (при `MEDIA_SELF=1` — ещё и сам, когда к месту).
-- **Потянуть время** (`later`) — на первую просьбу отмазывается («щас не могу», «потом скину»);
-  если просят снова — соглашается, и файл уходит сам через `delay` минут.
-- **Голосовые** — перед отправкой собеседник видит «записывает аудио» столько, сколько длится
-  запись; у сообщения есть волна, как у настоящего голосового. Если голосовые включены, на
-  «скинь голосовое» бот может отправить подходящее готовое.
-- **Кружочки** — перед отправкой видно «записывает видео».
-- Одно и то же медиа в один чат дважды не уходит; за один ответ — не больше одного медиа.
-- Отложенные отправки (`later`) теряются при перезапуске бота; на паузе и в заглушённом
-  чате не отправляются, в анонимном — если собеседник уже сменился.
-- Каждая отправка дублируется в «Избранное» (если `NOTIFY=1`).
+- **Only on request** (`MEDIA_SELF=0`, the default) — the bot never offers anything itself. The request
+  ("скинь фотку", "запиши гс", "покажи кота", "есть фото?", "send a pic") is checked by the code, not
+  only by the model: without a request no media goes out, even if the model decides to send. And only
+  the requested kind goes out: they ask for a voice message — no photo is sent.
+- **Right away** (`now`) — sends on the first request (with `MEDIA_SELF=1` — also on its own when it fits).
+- **Stall** (`later`) — on the first request it makes an excuse ("can't right now", "I'll send it later");
+  if asked again, it agrees and the file goes out by itself after `delay` minutes.
+- **Voice messages** — before sending, the other person sees "recording audio" for as long as the
+  recording lasts; the message has a waveform, like a real voice message. If voice is enabled, the bot can
+  answer "send a voice message" with a suitable ready-made one.
+- **Video messages** — "recording video" is shown before sending.
+- The same media is never sent to the same chat twice; at most one media per reply.
+- Delayed sends (`later`) are lost on bot restart; they aren't sent while paused or in a muted
+  chat, nor in the anonymous chat if the partner has already changed.
+- Every send is copied to Saved Messages (if `NOTIFY=1`).
 
-Нужен `ffmpeg` (как и для распознавания голосовых).
+Requires `ffmpeg` (as does voice recognition).
 
-## Как это устроено
+---
+
+## How it works
 
 ```
-сообщение → фильтры (белый список / анонимный бот, возраст, пауза)
-          → ждём паузу «как человек», собираем историю чата
-          → промпт: правила + persona.md + подсказки к последнему сообщению
-          → модель → постобработка (тире, эмодзи, точки, «понятно, ...»)
-          → проверки: пусто / сухо / повтор → переспросить модель
-          → «печатает…» → отправка одним или двумя сообщениями
+message → filters (whitelist / anonymous bot, age, pause)
+        → wait a "human" pause, collect the chat history
+        → prompt: rules + persona.md + hints for the latest message
+        → model → post-processing (dashes, emoji, periods, "I see, ...")
+        → checks: empty / dry / repeat → ask the model again
+        → "typing…" → send as one or two messages
 ```
 
-Что оказалось важным для живого общения:
-- **Настоящие роли** `system/user/assistant` вместо одной простыни текста — модель не пишет диалог «за обе стороны».
-- **Подсказка к конкретному сообщению** («собеседник написал „д“ — это девушка») работает лучше, чем общее правило в промпте.
-- **Важное проверяется кодом**, а не промптом: возраст, повторы, пустые ответы.
-- **Постобработка** дешевле и надёжнее, чем уговаривать модель не ставить точки.
+What turned out to matter for natural conversation:
+- **Real `system/user/assistant` roles** instead of one wall of text — the model doesn't write the dialog "for both sides".
+- **A hint about the specific message** ("they wrote 'д' — that's a girl") works better than a general rule in the prompt.
+- **Important things are checked by code**, not by the prompt: age, repeats, empty replies.
+- **Post-processing** is cheaper and more reliable than persuading the model not to use periods.
 
-Правила общения — ключ `rules` в `personality.toml`, поправь под себя.
-
----
-
-## Безопасность и ответственность
-
-- **Это юзербот** — автоматизация обычного аккаунта. Telegram может ограничить или заблокировать аккаунт за автоматические сообщения, особенно незнакомым людям. Используй на свой риск; лучше начать с отдельного аккаунта.
-- **Кто отвечает.** Сам бот про ИИ не заговаривает, но на прямой вопрос «ты бот?» отвечает честно: сейчас за тебя отвечает ИИ-ассистент. Если хочешь предупреждать сразу — задай `DISCLOSURE_TEXT` (личные чаты) и/или `ANON_DISCLOSURE_TEXT`.
-- **Несовершеннолетние.** В анонимном режиме модель больше не завершает диалог сама по возрасту собеседника: фильтра по возрасту нет.
-- **Prompt injection.** Текст собеседника попадает в промпт. Модель получает только текст и ничего не может запустить; движок `dsh` работает в режиме `read-only`. Не давай модели инструментов.
-- **Приватность.** С облачной моделью вся переписка уходит провайдеру. С локальной — никуда не уходит.
-- Бот не договаривается о встречах, деньгах, не даёт контакты и не обещает ничего от твоего имени — но это правила для модели, а не гарантия. Читай уведомления в «Избранном».
+The conversation rules are the `rules` key in `personality.toml` — adjust them to taste.
 
 ---
 
-## Решение проблем
+## Safety and responsibility
 
-| Симптом | Решение |
+- **This is a userbot** — automation of a regular account. Telegram may restrict or ban an account for automated messages, especially to strangers. Use at your own risk; better start with a separate account.
+- **Who is replying.** The bot doesn't bring up AI on its own, but a direct "are you a bot?" gets an honest answer: an AI assistant is replying for you right now. If you want to warn people up front, set `DISCLOSURE_TEXT` (private chats) and/or `ANON_DISCLOSURE_TEXT`.
+- **Minors.** In anonymous mode the model no longer ends the dialog by itself based on the other person's age: there is no age filter.
+- **Prompt injection.** The other person's text goes into the prompt. The model only gets text and can't run anything; the `dsh` engine runs `read-only`. Don't give the model tools.
+- **Privacy.** With a cloud model the whole conversation goes to the provider. With a local one it goes nowhere.
+- The bot doesn't arrange meetings or money, doesn't give out contacts and doesn't promise anything on your behalf — but these are rules for the model, not a guarantee. Read the notifications in Saved Messages.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
 |---|---|
-| `Заполни TG_API_ID и TG_API_HASH` | шаг 1: ключи с my.telegram.org в `.env` |
-| `белый список пуст — отвечать некому` | заполни `ALLOW_USERS`, `ALLOW_NON_CONTACTS=1` или `ANON_BOT` |
-| `userbot уже запущен` | второй экземпляр: `systemctl --user stop userbot` или закрой другой терминал |
-| `database is locked` | бот и `send.py`/`login.py` запущены одновременно; бот сам пробует восстановить сессию |
-| `LLM HTTP 401` | неверный или пустой `LLM_API_KEY` |
-| `LLM HTTP 400` с облачным API | стоит `ENGINE=llamacpp` → поставь `ENGINE=openai` |
-| `Connection refused` | сервер модели не запущен или ещё грузится; проверь `curl $LLM_URL/models` |
-| Бот отвечает слишком медленно | модель тяжёлая или включены размышления: `LLM_THINK=0`, модель поменьше |
-| Бот молчит в чате | ты недавно писал сам (`TAKEOVER_MINUTES`), лимит в час, или человек не в белом списке; смотри лог |
-| Бот выдумывает, что на фото | `LLM_VISION=0` или модель без зрения — фото до неё не доходит |
-| Ответы «как робот» | модель побольше; добавь в `persona.md` детали, истории и примеры своих сообщений |
+| `Заполни TG_API_ID и TG_API_HASH` (fill in the API keys) | step 1: keys from my.telegram.org in `.env` |
+| `белый список пуст — отвечать некому` (whitelist empty) | fill in `ALLOW_USERS`, `ALLOW_NON_CONTACTS=1` or `ANON_BOT` |
+| `userbot … уже запущен` (already running) | a second instance: `systemctl --user stop userbot` or close the other terminal |
+| `нет аккаунта «…»` (no such account) | log in first: `login.py -a <name> …` or `qr_login.py -a <name>` |
+| `PERSONA=…: нет папки personas/…` | create `personas/<name>/` or fix `PERSONA` in the account's `.env` |
+| `database is locked` | the bot and `send.py`/`login.py` run at the same time; the bot tries to recover the session itself |
+| `LLM HTTP 401` | wrong or empty `LLM_API_KEY` |
+| `LLM HTTP 400` with a cloud API | `ENGINE=llamacpp` is set → use `ENGINE=openai` |
+| `Connection refused` | the model server isn't running or is still loading; check `curl $LLM_URL/models` |
+| The bot replies too slowly | heavy model or thinking enabled: `LLM_THINK=0`, a smaller model; with several accounts — they wait in the `LLM_PARALLEL` queue |
+| The bot is silent in a chat | you wrote yourself recently (`TAKEOVER_MINUTES`), hourly limit, or the person isn't whitelisted; check the log |
+| The bot makes up what's in a photo | `LLM_VISION=0` or a model without vision — the photo doesn't reach it |
+| Replies sound robotic | a bigger model; add details, stories and examples of your messages to `persona.md` |
 
 ---
 
-## Файлы
+## Files
 
-| Файл | Что это |
+| File | What it is |
 |---|---|
-| `userbot.py` | сам бот |
-| `ub`, `ub.py` | управление запущенным ботом из другого терминала: `./ub` |
-| `.env.example` | шаблон настроек → копируй в `.env` |
-| `persona.example.md` | шаблон описания себя → копируй в `persona.md` |
-| `personality.example.toml` | шаблон поведения и фраз бота → копируй в `personality.toml` |
-| `login.py`, `qr_login.py` | вход в аккаунт без интерактивного ввода / по QR |
-| `send.py` | отправить одно сообщение от своего имени: `send.py @user "текст"` |
-| `inspect_anon.py` | отладка: последние сообщения анонимного бота с пометками |
-| `userbot.service` | сервис systemd для автозапуска |
-| `userbot@.service` | то же, по сервису на аккаунт: `userbot@main`, `userbot@work` |
-| `accounts.py` | где лежат файлы каждого аккаунта (`--account <имя>`) |
-| `accounts/<имя>/` | дополнительные аккаунты: свой `.env` (отличия), `state/`, по желанию своя личность (в `.gitignore`) |
-| `personas/<имя>/` | именованные личности (`persona.md`, `personality.toml`, `media/`) для `PERSONA=<имя>` (в `.gitignore`) |
-| `run.sh` | запуск с автоперезапуском и консолью `ub` |
-| `state/` | сессия, состояние, лок, память о собеседниках (создаётся сам, в `.gitignore`) |
-| `files/` | файлы, которые бот может отправить (`FILES_DIR`) |
-| `media.example.toml` | шаблон описаний своих фото/видео/голосовых/кружков → `media/media.toml` |
+| `userbot.py` | the bot itself |
+| `ub`, `ub.py` | control a running bot from another terminal: `./ub` |
+| `.env.example` | settings template → copy to `.env` |
+| `persona.example.md` | template for describing yourself → copy to `persona.md` |
+| `personality.example.toml` | template of the bot's behaviour and phrases → copy to `personality.toml` |
+| `login.py`, `qr_login.py` | log in without interactive input / via QR |
+| `send.py` | send one message as yourself: `send.py @user "text"` |
+| `inspect_anon.py` | debugging: latest messages of the anonymous bot with markers |
+| `userbot.service` | systemd service for autostart |
+| `userbot@.service` | the same, one service per account: `userbot@main`, `userbot@work` |
+| `accounts.py` | where each account's files live (`--account <name>`) |
+| `accounts/<name>/` | additional accounts: own `.env` (differences), `state/`, optionally own personality (in `.gitignore`) |
+| `personas/<name>/` | named personalities (`persona.md`, `personality.toml`, `media/`) for `PERSONA=<name>` (in `.gitignore`) |
+| `run.sh` | start with auto-restart and the `ub` console |
+| `state/` | session, state, lock, memory about people (created automatically, in `.gitignore`) |
+| `files/` | files the bot may send (`FILES_DIR`) |
+| `media.example.toml` | template for describing your photos/videos/voice/video messages → `media/media.toml` |
+| `README.ru.md` | this documentation in Russian |
 
 ---
 
-## Лицензия
+## License
 
 [MIT](LICENSE)
