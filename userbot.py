@@ -617,12 +617,24 @@ async def sticker_intent(history: list[str]) -> str:
 _GREET_RE = re.compile(r"\s*(привет\w*|прив\b|здаров\w*|здравствуй\w*|хай\b|ку\b|добр\w+ (утро|день|вечер))", re.I)
 
 
+# «что такое гс?», «туса это что?», «что значит кринж», «what's wyd» — короткий вопрос про слово
+_WHAT_IS_RE = re.compile(
+    r"^\W*(?:а\s+)?(?:что\s+(?:такое|значит|означает)|чё\s+(?:такое|значит)|what(?:'s| is| does))\s+\S+(?:\s+\S+)?\W*$"
+    r"|^\W*(?!(?:ты|вы|он|она|они|я|мы|а|ну|и|это|так|вот)\b)\S+(?:\s+\S+)?\s*(?:-\s*)?"
+    r"(?:это\s+(?:что|чё|как)|это\s+что\s+такое)\W*$", re.I)
+
+
 def situation_note(pending: list[str], name: str, history: list[str]) -> str:
     """Подсказки под конкретные ситуации в последней пачке сообщений."""
     text = "\n".join(pending)
     parts = []
     if media_only(pending):
         return ""  # стикеры/гифки решает sticker_intent() в respond()
+    if pending and _WHAT_IS_RE.match(pending[-1].strip()):
+        parts.append("Он спрашивает, что значит слово. Ответь как друг в переписке - одним-тремя словами, "
+                     "синонимом, без определения и без «это когда…»/«типа когда…» (например: «гс?» -> "
+                     "«голосовое»)." + (" Можно следом коротко «а что?»." if random.random() < 0.5 else
+                                         " Больше ничего не добавляй."))
     if name == ANON_NAME and not any(t and t[0] == "assistant" for t in map(_history_turn, history)):
         parts.append("Это твоё ПЕРВОЕ сообщение новому собеседнику в анонимном чате. Начни с «привет» "
                      "(даже если он сам не поздоровался, а написал только «м»/«д» или вопрос) и коротко "
@@ -663,9 +675,11 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
                      "что послушал: скажи, что щас не можешь послушать, и попроси написать текстом.")
     if _VOICE_ASK_RE.search(text) and "voice" in MEDIA_SEND and any(
             it["kind"] == "voice" for it in load_media().values()):
-        parts.append("Он просит голосовое. Новое записать ты не можешь, но можешь отправить одно из своих "
-                     "готовых голосовых из списка медиа, если оно подходит по смыслу (тег [медиа: имя]). "
-                     "Если ни одно не подходит - скажи текстом, что щас не можешь говорить.")
+        ex = random.choice(("лови", "вот, слушай", "короче, слушай", "щас расскажу", "ну держи", "ок, слушай"))
+        parts.append("Он просит голосовое. Если одно из твоих готовых голосовых из списка медиа подходит "
+                     f"по смыслу - просто отправь его тегом [медиа: имя] (можно с парой слов, например «{ex}»): "
+                     "это и есть голосовое, не пиши, что не можешь говорить или записать. "
+                     "Только если ни одно не подходит - скажи текстом, что щас не можешь говорить.")
     elif _VOICE_ASK_RE.search(text):
         parts.append("Он просит голосовое. Ты сейчас не можешь записать голосовое - коротко скажи это "
                      "текстом (например, «щас не могу говорить, давай текстом») и продолжай разговор. "
@@ -1567,9 +1581,17 @@ def extract_file_actions(raw: str) -> tuple[str, list[tuple]]:
         body = re.sub(r"^\s*```[\w-]*\n|\n?```\s*$", "", m.group(2).strip("\n"))
         acts.append(("create", m.group(1), body))
     rest = FILE_CREATE_RE.sub("", raw or "")
-    acts += [("send", m.group(1)) for m in FILE_SEND_RE.finditer(rest)]
+    media: list[tuple] = []
+    for m in FILE_SEND_RE.finditer(rest):
+        # модель путает теги: [отправить: voice/…] вместо [медиа: voice/…] — если такого
+        # документа в files/ нет, а среди медиа есть, это медиа
+        if not find_file(m.group(1)) and find_media(m.group(1)):
+            media.append(("media", m.group(1)))
+        else:
+            acts.append(("send", m.group(1)))
     rest = FILE_SEND_RE.sub("", rest)
-    acts += [("media", m.group(1)) for m in MEDIA_TAG_RE.finditer(rest)][:1]  # медиа — по одному за ответ
+    media += [("media", m.group(1)) for m in MEDIA_TAG_RE.finditer(rest)]
+    acts += media[:1]  # медиа — по одному за ответ
     rest = MEDIA_TAG_RE.sub("", rest)
     if not FILES_SEND:  # отправка файлов выключена — теги вырезаем, но ничего не делаем
         acts = [a for a in acts if a[0] == "media"]
@@ -1577,11 +1599,13 @@ def extract_file_actions(raw: str) -> tuple[str, list[tuple]]:
 
 
 async def do_file_actions(chat_id: int, acts: list[tuple], name: str, anon: bool = False,
-                          now: bool = False, caption: str | None = None) -> None:
+                          now: bool = False, caption: str | None = None) -> int:
+    """Сколько файлов/медиа реально ушло (или встало в очередь)."""
+    ok = 0
     for act in acts:
         if act[0] == "media":
             try:
-                await do_media_action(chat_id, act[1], name, anon, now, caption)
+                ok += await do_media_action(chat_id, act[1], name, anon, now, caption)
             except Exception as exc:  # noqa: BLE001
                 it = find_media(act[1])
                 if it:
@@ -1602,9 +1626,11 @@ async def do_file_actions(chat_id: int, acts: list[tuple], name: str, anon: bool
             sent_log.setdefault(chat_id, []).append(time.time())
             print(f"[{chat_id}] → файл {path.name}" + (" (создан)" if act[0] == "create" else ""))
             await notify(f"📎 → {name}: {path.name}")
+            ok += 1
         except Exception as exc:  # noqa: BLE001
             print(f"[{name}] ошибка отправки файла: {exc}", file=sys.stderr)
     save_state()
+    return ok
 
 
 # ── медиа: фото, видео, голосовые и кружочки из папки MEDIA_DIR ─────────────
@@ -1692,11 +1718,10 @@ def about_from_name(f: Path, kind: str) -> str:
         # «да (грустно)» → говорю «да», пометка в скобках — как говорю, а не часть фразы
         m = re.fullmatch(r"(.+?)\s*\(([^()]+)\)", name)
         if m:
-            return f"голосовое, говорю: «{m.group(1)}» ({m.group(2).strip()})"
-        return f"голосовое, говорю: «{name}»"
-    if kind == "round":
-        return f"кружочек: {name}"
-    return f"{MEDIA_KIND_RU[kind]}: {name}"
+            return f"говорю: «{m.group(1)}» ({m.group(2).strip()})"
+        return f"говорю: «{name}»"
+    # вид («фото», «кружочек») модель и так видит рядом: в списке медиа и в «[ты отправил фото: …]»
+    return name
 
 
 def name_lang(f: Path, kind: str) -> str | None:
@@ -1781,6 +1806,17 @@ def find_media(name: str, kinds: set[str] | None = None) -> dict | None:
     for it in items.values():  # модель часто пишет просто имя файла
         if it["path"].name.lower() == want or it["path"].stem.lower() == want:
             return it
+    # длинные имена модель переписывает с искажениями («смо트рю», «_» вместо пробела,
+    # без .mp3) — берём самое похожее, если оно похоже достаточно и однозначно
+    import difflib  # noqa: PLC0415
+
+    def norm(x: str) -> str:
+        x = re.sub(r"\.(?:" + "|".join(e.lstrip(".") for v in _MEDIA_EXT.values() for e in v) + r")$", "", x.lower())
+        return re.sub(r"[\s_]+", " ", x.replace("ё", "е")).strip()
+    w = norm(want)
+    scored = sorted(((difflib.SequenceMatcher(None, w, norm(rel)).ratio(), rel) for rel in items), reverse=True)
+    if scored and scored[0][0] >= 0.85 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.05):
+        return items[scored[0][1]]
     return None
 
 
@@ -1803,7 +1839,31 @@ def media_status(chat_id: int) -> str:
     return " ".join(parts)
 
 
-def media_ask_note(chat_id: int, asked: set[str] | None) -> str:
+# слова самой просьбы — по ним тему не ищем («запиши голосовое» есть в каждой просьбе)
+_TOPIC_SKIP = re.compile(r"^(?:голос|запиш|запис|скин|скид|кинь|отпра|пришл|прису|покаж|можеш|может|"
+                         r"давай|пожал|плиз|хочу|сдела|расск|ладно|прям|тольк|какой|какую|какое|"
+                         r"этот|этом|этой|свой|своё|твой|твоё|тебя|себя|сейча|потом|send|voice|record|"
+                         r"please|could|would|about|photo|video)")
+
+
+def _topic_stems(text: str) -> set[str]:
+    """Основы значимых слов: первые 5 букв, слова от 4 букв («фильм», «фильме» → «фильм»)."""
+    return {w[:5] for w in re.findall(r"[а-яёa-z]{4,}", text.lower().replace("ё", "е"))
+            if not _TOPIC_SKIP.match(w)}
+
+
+def media_on_topic(history: list[str], items: list[tuple[str, dict]]) -> list[str]:
+    """Файлы, в описании которых есть слова из его последних сообщений («голосовое про фильм» →
+    голосовое со словом «фильм»). Сначала — где совпало больше слов."""
+    texts = [t[1] for t in map(_history_turn, history[-4:]) if t and t[0] == "user"]
+    want = _topic_stems(" ".join(texts))
+    if not want:
+        return []
+    scored = [(len(want & _topic_stems(it["about"])), rel) for rel, it in items]
+    return [rel for n, rel in sorted(scored, key=lambda x: -x[0]) if n][:3]
+
+
+def media_ask_note(chat_id: int, asked: set[str] | None, history: list[str] | None = None) -> str:
     """Подсказка к конкретной просьбе: что именно он просит и какие файлы ЭТОГО вида у тебя есть.
     Без неё модель путается (на «скинь фото» ставит тег видео или голосового)."""
     if asked is None or not MEDIA_SEND:
@@ -1818,7 +1878,10 @@ def media_ask_note(chat_id: int, asked: set[str] | None) -> str:
                 "отмажься текстом по-человечески.")
     lst = "; ".join(f"[медиа: {rel}] - {it['about']}" + (" (потяни время)" if it["when"] == "later" else "")
                     for rel, it in items)
-    return (f"Он просит прислать {what}. Подходят ТОЛЬКО эти твои файлы: {lst}. "
+    top = media_on_topic(history or [], items)
+    best = (f" По теме его просьбы больше всего подходит: {', '.join(f'[медиа: {r}]' for r in top)} - "
+            "если по описанию это то, о чём он просит, отправь его тегом, а не отказывайся.") if top else ""
+    return (f"Он просит прислать {what}. Подходят ТОЛЬКО эти твои файлы: {lst}.{best} "
             "Если по описанию один из них - то, что он просит, поставь его тег. Если просит другое "
             "(не то, что на них) - не ставь тег, отмажься текстом. Файлы другого вида не предлагай.")
 
@@ -2034,24 +2097,25 @@ async def media_still_there(chat_id: int, it: dict) -> bool:
 
 
 async def do_media_action(chat_id: int, ref: str, name: str, anon: bool = False, now: bool = False,
-                          caption: str | None = None) -> None:
+                          caption: str | None = None) -> bool:
+    """True — медиа ушло или поставлено в очередь; False — ничего не отправлено."""
     it = find_media(ref, set(MEDIA_KINDS) if now else None)  # по твоему указанию — любые виды
     if not it:
         print(f"[{name}] медиа «{ref}» нет / вид выключен (MEDIA_SEND)")
         await notify(f"🖼 {name}: модель хотела отправить «{ref}», такого нет")
-        return
+        return False
     done = media_sent_in(chat_id)
     if done.get(it["name"], "").startswith("sent") and not await media_still_there(chat_id, it):
         done.pop(it["name"], None)  # то сообщение удалили из чата — можно отправить снова
     if done.get(it["name"]):
         print(f"[{name}] {it['name']} уже {'в очереди' if done[it['name']] == 'pending' else 'отправлено'} — не дублирую")
-        return
+        return False
     anon_partner = state.get("anon_partner") if anon else None
     if it["when"] == "now" or now:  # now — ты сам попросил через .ub tell: без оттягивания
         done[it["name"]] = "pending"
         await asyncio.sleep(random.uniform(1, 4))
         await _deliver_media(chat_id, it, name, anon_partner, caption=caption)
-        return
+        return True
     lo, hi = sorted(it["delay"])
     wait = random.uniform(lo, hi) * 60
     done[it["name"]] = "pending"
@@ -2071,6 +2135,7 @@ async def do_media_action(chat_id: int, ref: str, name: str, anon: bool = False,
             _media_tasks.pop(f"{chat_id}:{it['name']}", None)
 
     _media_tasks[f"{chat_id}:{it['name']}"] = asyncio.create_task(later())
+    return True
 
 
 def media_history_label(chat_id: int, msg_id: int) -> str | None:
@@ -2659,7 +2724,9 @@ def save_contact(user: User, data: dict) -> None:
 
 
 def _log_line(m) -> str | None:
-    body = describe(m)
+    # своё медиа, отправленное ботом, — с описанием («[ты отправил голосовое: говорю: «…»]»),
+    # а не пустым «[голосовое сообщение]»: иначе в памяти о человеке теряется, о чём оно
+    body = (m.out and media_history_label(m.chat_id, m.id)) or describe(m)
     if not body:
         return None
     body = PHOTO_TAG_RE.sub(media_plain, body).split("\n--- содержимое ---")[0]
@@ -3354,7 +3421,7 @@ async def respond(chat_id: int, user: User) -> None:
                                 situation_note(pending, name, history),
                                 gap_note(history) or repeat_note(history) or stall_note(history),
                                 media_status(chat_id) if MEDIA_SEND else "",
-                                media_ask_note(chat_id, media_asked(history)) if not hint_text else "") if x)
+                                media_ask_note(chat_id, media_asked(history), history) if not hint_text else "") if x)
     if heart_due(history) == "ask":
         note += (" Он просит сердечко: оно уйдёт само отдельным сообщением сразу после твоего ответа, "
                  "так что ответь по-тёплому в пару слов («лови», «держи»), сам эмодзи не ставь, "
@@ -3605,7 +3672,7 @@ async def respond(chat_id: int, user: User) -> None:
             keep.append(a)
         if why_drop == "wrong_kind":
             # модель перепутала вид (видео вместо фото) — переспрашиваем, показав только подходящие файлы
-            fix = (media_ask_note(chat_id, asked) + " В прошлый раз ты поставил тег файла не того вида - "
+            fix = (media_ask_note(chat_id, asked, history) + " В прошлый раз ты поставил тег файла не того вида - "
                    "так нельзя.")
             raw2 = await run_harness(build_task(name, history, fix, note), build_messages(name, history, fix, note))
             if state["paused"] or chat_id in manual_during:
@@ -3693,7 +3760,15 @@ async def respond(chat_id: int, user: User) -> None:
     elif hint and auto_hints.get(chat_id) == hint:
         auto_hints.pop(chat_id, None)
     if file_actions:
-        await do_file_actions(chat_id, file_actions, name, anon, now=bool(hint_text), caption=caption)
+        sent_files = await do_file_actions(chat_id, file_actions, name, anon, now=bool(hint_text), caption=caption)
+        if not sent_files and not reply:
+            # весь ответ был тегом файла, а файл не ушёл — без этого собеседник не получит вообще ничего
+            fallback = caption or random.choice(
+                ["блин, щас не получается скинуть, давай позже", "ой, не отправляется что-то, потом скину"]
+                if not is_english(history) else ["ugh it won't send rn, later", "hm it's not sending, i'll send it later"])
+            print(f"[{name}] файл не ушёл, а текста не было — пишу «{fallback}»")
+            await send_human(chat_id, fallback, fast=anon)
+            await notify(f"🤖 → {name}:\n{fallback}")
     await burn_ttl(chat_id)
     if not anon:
         await sync_contact(chat_id, user)

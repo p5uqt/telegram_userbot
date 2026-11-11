@@ -658,9 +658,12 @@ when  = "never"                          # don't send
 **Without an entry in `media.toml` the bot understands a file by its name.** So name files after what's in them:
 a voice message — by the words you say (`voice/how are you.mp3`, `voice/reading a book, wbu.mp3`), photos and
 videos — by what's on them (`photo/cat sleeping on the windowsill.jpg`). The model sees e.g.
-`голосовое, говорю: «reading a book, wbu»` ("voice message, I say: …"); `_` in the name counts as a space. `when` = `now`
+`говорю: «reading a book, wbu»` ("I say: …"); `_` in the name counts as a space. `when` = `now`
 (or `later` if the file is in a `later/` subfolder). The language of a voice/video message without an entry is taken
 from the letters of its name: Cyrillic — `ru`, Latin — `en`; photos and videos fit everyone.
+When someone asks for media ("record a voice message about the movie"), the bot looks for the words of the request
+in the descriptions and points the model to the best matches — so put **what the file is about** in the name/`about`
+("telling the plot of the movie The Purge"), not just its first words.
 An entry in `media.toml` always wins over the name — write one when the name can't hold everything
 (or you need `when`, `delay`, `lang`).
 
