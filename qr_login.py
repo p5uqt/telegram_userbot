@@ -3,6 +3,7 @@
 Writes state/qr.png (opened automatically) and prints the QR in the terminal.
 Refreshes the QR every ~25s, gives up after 5 minutes."""
 import asyncio
+import os
 import subprocess
 import sys
 
@@ -10,9 +11,15 @@ import qrcode
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
-import userbot as u
+import accounts  # noqa: E402
 
-PNG = u.HERE / "state" / "qr.png"
+# новый аккаунт создаётся при первом входе: login.py -a work ... → папка accounts/work/
+os.environ["UB_ACCOUNT"] = accounts.pop_account_arg(sys.argv)
+accounts.state_dir(os.environ["UB_ACCOUNT"]).mkdir(parents=True, exist_ok=True)
+
+import userbot as u  # noqa: E402
+
+PNG = u.STATE_DIR / "qr.png"
 
 
 def show(url: str, first: bool) -> None:
@@ -26,8 +33,8 @@ def show(url: str, first: bool) -> None:
 
 
 async def main() -> None:
-    (u.HERE / "state").mkdir(exist_ok=True)
-    client = TelegramClient(str(u.HERE / "state" / "account"), u.CFG["api_id"], u.CFG["api_hash"])
+    print(f"аккаунт: {u.ACCOUNT}")
+    client = TelegramClient(str(u.STATE_DIR / "account"), u.CFG["api_id"], u.CFG["api_hash"])
     await client.connect()
     try:
         if await client.is_user_authorized():

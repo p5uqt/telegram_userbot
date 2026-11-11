@@ -1,6 +1,8 @@
 # секреты и личное — НИКОГДА не коммитить
 .env
 state/
+accounts/
+personas/
 *.session
 *.session-journal
 persona.md

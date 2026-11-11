@@ -39,6 +39,13 @@ from telethon.tl import functions
 from telethon.tl.types import User
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import accounts  # noqa: E402
+
+# несколько аккаунтов: --account <имя> (см. accounts.py); без флага — main, как раньше
+ACCOUNT = accounts.pop_account_arg(sys.argv)
+ACC_DIR = accounts.account_dir(ACCOUNT)
+STATE_DIR = accounts.state_dir(ACCOUNT)
 
 
 def load_env(path: Path) -> None:
@@ -55,6 +62,10 @@ def load_env(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+if ACCOUNT != accounts.MAIN:
+    if not ACC_DIR.is_dir():
+        sys.exit(f"нет аккаунта «{ACCOUNT}»: сначала войди — login.py -a {ACCOUNT} +380… или qr_login.py -a {ACCOUNT}")
+    load_env(ACC_DIR / ".env")   # сначала отличия аккаунта — load_env не перезаписывает уже заданное
 load_env(HERE / ".env")
 
 
@@ -155,7 +166,39 @@ CFG = {
 
 
 # ── личность: personality.toml (или personality.example.toml) ───────────────
-PERSONALITY_FILE = HERE / "personality.toml"
+# Где искать persona.md и personality.toml (каждый файл — отдельно, первый найденный):
+#   1. personas/<PERSONA>/  — именованная личность, если в .env аккаунта задано PERSONA=<имя>
+#                             (одну такую личность могут делить несколько аккаунтов)
+#   2. accounts/<аккаунт>/  — своя личность этого аккаунта
+#   3. корень               — общая личность (как раньше)
+PERSONA_NAME = os.environ.get("PERSONA", "").strip()
+if PERSONA_NAME and not accounts.NAME_RE.match(PERSONA_NAME):
+    sys.exit(f"PERSONA={PERSONA_NAME!r}: латиница, цифры, _ и -")
+if PERSONA_NAME and not (HERE / "personas" / PERSONA_NAME).is_dir():
+    sys.exit(f"PERSONA={PERSONA_NAME}: нет папки personas/{PERSONA_NAME}/")
+PERSONA_DIRS = ([HERE / "personas" / PERSONA_NAME] if PERSONA_NAME else []) \
+    + ([ACC_DIR] if ACC_DIR != HERE else []) + [HERE]
+
+
+def persona_file(name: str) -> Path:
+    """Первый существующий name по PERSONA_DIRS (или общий, если нет нигде)."""
+    return next((d / name for d in PERSONA_DIRS if (d / name).exists()), HERE / name)
+
+
+def _rel(f: Path) -> str:
+    return str(f.relative_to(HERE)) if f.is_relative_to(HERE) else str(f)
+
+
+def persona_src(f: Path) -> str:
+    """Откуда взят файл личности — для status: общая / своя аккаунта / personas/<имя>."""
+    if not f.exists():
+        return "пример" if f.name != "media" else "нет"
+    if f.parent == HERE:
+        return "общая"
+    return "своя аккаунта" if f.parent == ACC_DIR else _rel(f.parent)
+
+
+PERSONALITY_FILE = persona_file("personality.toml")
 _P_KEYS = ("name", "rules", "style_examples", "hook_ideas", "meet_deflect", "laughs",
            "howru_short", "howru_followup")
 
@@ -169,7 +212,7 @@ def load_personality() -> dict:
             missing = [k for k in _P_KEYS if not data.get(k)]
             if missing:
                 sys.exit(f"{f.name}: не заданы {', '.join(missing)}")
-            print(f"[личность] {f.name}: {data['name']}")
+            print(f"[личность] {_rel(f)}: {data['name']}")
             return data
     sys.exit("нет personality.toml / personality.example.toml")
 
@@ -517,7 +560,7 @@ async def sticker_intent(history: list[str]) -> str:
     ]
     try:
         if CFG["engine"] in ("openai", "llamacpp"):
-            raw = await asyncio.to_thread(_openai_call, msgs, 10)
+            raw = await llm_thread(_openai_call, msgs, 10)
         else:
             raw = await run_harness(msgs[0]["content"] + "\n\n" + PHOTO_TAG_RE.sub(media_plain, lines))
     except Exception as exc:  # noqa: BLE001
@@ -755,9 +798,10 @@ def is_anon_bot(u) -> bool:
 def is_anon_system(msg) -> bool:
     return bool(msg.reply_markup) or bool(ANON_SYSTEM_RE.search(msg.raw_text or ""))
 
-STATE_FILE = HERE / "state" / "state.json"
+STATE_FILE = STATE_DIR / "state.json"
 SANDBOX = HERE / "sandbox"
-PERSONA_FILE = HERE / "persona.md"
+PERSONA_FILE = persona_file("persona.md")
+print(f"[личность] о себе: {_rel(PERSONA_FILE) if PERSONA_FILE.exists() else 'persona.example.md'}")
 
 
 def load_state() -> dict:
@@ -943,6 +987,58 @@ def child_env() -> dict:
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
 
 
+# ── очередь к модели: общая для всех аккаунтов (все процессы userbot) ────────
+# Локальная модель тянет ограниченное число запросов разом; когда несколько аккаунтов
+# хотят ответить одновременно, лишние ждут свободного слота (файловые блокировки в
+# корневом state/, поэтому очередь общая между процессами). LLM_PARALLEL=0 — без очереди.
+LLM_SLOTS = max(0, int(env_float("LLM_PARALLEL", 1)))
+LLM_QUEUE = {"waiting": 0}
+_SLOT_DIR = accounts.state_dir(accounts.MAIN) / "llm_slots"
+
+
+async def llm_thread(fn, *args):
+    """fn(*args) в потоке, но только когда свободен слот модели. Ожидание — асинхронное,
+    поэтому отменённый ответ (собеседник ушёл, /next) просто выходит из очереди."""
+    if not LLM_SLOTS:
+        return await asyncio.to_thread(fn, *args)
+    _SLOT_DIR.mkdir(parents=True, exist_ok=True)
+    fh, waited, t0 = None, False, time.monotonic()
+    try:
+        while fh is None:
+            for i in range(LLM_SLOTS):
+                f = open(_SLOT_DIR / f"slot{i}.lock", "w")
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fh = f
+                    break
+                except OSError:
+                    f.close()
+            if fh is None:
+                if not waited:
+                    waited = True
+                    LLM_QUEUE["waiting"] += 1
+                    print("[llm] модель занята другим ответом — жду в очереди")
+                await asyncio.sleep(0.5)
+        if waited:
+            print(f"[llm] очередь подошла через {time.monotonic() - t0:.0f} с")
+            LLM_QUEUE["waiting"] -= 1
+            waited = False
+        slot, fh = fh, None   # дальше слот отпускает сам поток: даже если ответ отменят,
+                              # запрос к модели досчитается, и до того слот занят честно
+
+        def run():
+            try:
+                return fn(*args)
+            finally:
+                slot.close()   # закрытие снимает flock
+        return await asyncio.to_thread(run)
+    finally:
+        if waited:
+            LLM_QUEUE["waiting"] -= 1
+        if fh is not None:
+            fh.close()
+
+
 def _ollama_call(messages: list[dict]) -> str:
     payload = json.dumps({
         "model": CFG["ollama_model"],
@@ -973,7 +1069,7 @@ def _ollama_call(messages: list[dict]) -> str:
 
 
 async def run_ollama(messages: list[dict]) -> str:
-    raw = await asyncio.to_thread(_ollama_call, messages)
+    raw = await llm_thread(_ollama_call, messages)
     # на случай, если модель всё же выдала рассуждения инлайном
     text = THINK_RE.sub("", raw).strip()
     # служебные маркеры ([SKIP]/[ESCALATE]) отдаём как есть
@@ -1030,7 +1126,7 @@ def _openai_call(messages: list[dict], max_tokens: int | None = None) -> str:
 
 
 async def run_openai(messages: list[dict]) -> str:
-    raw = await asyncio.to_thread(_openai_call, messages)
+    raw = await llm_thread(_openai_call, messages)
     text = THINK_RE.sub("", raw).strip()
     if text.startswith("["):
         return text
@@ -1460,7 +1556,8 @@ MEDIA_KINDS = ("photo", "video", "voice", "round")
 MEDIA_SEND = {k.strip().lower() for k in env_list("MEDIA_SEND")} & set(MEDIA_KINDS)
 if "all" in {k.strip().lower() for k in env_list("MEDIA_SEND")}:
     MEDIA_SEND = set(MEDIA_KINDS)
-MEDIA_DIR = Path(os.environ.get("MEDIA_DIR") or HERE / "media").resolve()
+# у своей личности — свои фото/голосовые: media/ ищется так же, как persona.md
+MEDIA_DIR = Path(os.environ.get("MEDIA_DIR") or persona_file("media")).resolve()
 MEDIA_CACHE = MEDIA_DIR / ".cache"
 MEDIA_LATER = (env_float("MEDIA_LATER_MIN", 10), env_float("MEDIA_LATER_MAX", 60))  # минуты
 MEDIA_KIND_RU = {"photo": "фото", "video": "видео", "voice": "голосовое", "round": "кружочек"}
@@ -1861,7 +1958,7 @@ WHISPER_MODEL = env_str("WHISPER_MODEL", default="small").strip()   # "" / 0 —
 WHISPER_THREADS = int(env_float("WHISPER_THREADS", 4))
 WHISPER_LANG = env_str("WHISPER_LANGUAGE", default="").strip() or None  # пусто = автоопределение
 VOICE_MAX_SEC = int(env_float("VOICE_MAX_SECONDS", 300))  # длиннее — не слушаем (как живой человек)
-VOICE_CACHE_FILE = HERE / "state" / "voice_cache.json"
+VOICE_CACHE_FILE = STATE_DIR / "voice_cache.json"
 
 
 def looks_hallucinated(text: str) -> bool:
@@ -2369,7 +2466,7 @@ async def collect_history(chat_id: int, name: str):
 # ── память о собеседниках ────────────────────────────────────────────────────
 # state/contacts/<id>.md: заметка «что я о нём знаю» + полный лог переписки.
 # Только личные чаты (анонимка — каждый раз новый человек, там не нужно).
-CONTACTS_DIR = HERE / "state" / "contacts"
+CONTACTS_DIR = STATE_DIR / "contacts"
 SUMMARY_EVERY = int(env_float("MEMORY_SUMMARY_EVERY", 10))  # обновлять заметку каждые N новых сообщений
 BOOTSTRAP_MESSAGES = int(env_float("MEMORY_BOOTSTRAP_MESSAGES", 400))
 contact_profiles: dict[str, str] = {}   # display name → заметка (для промпта)
@@ -2483,9 +2580,9 @@ SUMMARY_PROMPT = """Ты ведёшь личные заметки владель
 
 async def _memory_llm(msgs: list[dict], max_tokens: int = 700) -> str:
     if CFG["engine"] in ("openai", "llamacpp"):
-        raw = await asyncio.to_thread(_openai_call, msgs, max_tokens)
+        raw = await llm_thread(_openai_call, msgs, max_tokens)
     elif CFG["engine"] == "ollama":
-        raw = await asyncio.to_thread(_ollama_call, msgs)
+        raw = await llm_thread(_ollama_call, msgs)
     else:
         raw = await run_harness(msgs[0]["content"] + "\n\n" + msgs[1]["content"])
     return THINK_RE.sub("", raw).strip()
@@ -3965,7 +4062,12 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         return help_text(args[0].lower() if args else "", console)
     if cmd == "status":
         hints = ", ".join(str(c) for c in owner_hints) or "—"
-        return (f"{'⏸ пауза' if state['paused'] else '▶️ работает'}\n"
+        acc = (f"аккаунт: {ACCOUNT}" + (f" ({display_name(me)})" if me else "")
+               + f"\nличность: {P['name']} (поведение — {persona_src(PERSONALITY_FILE)}, "
+               f"о себе — {persona_src(PERSONA_FILE)}, медиа — {persona_src(MEDIA_DIR)})")
+        q = LLM_QUEUE["waiting"]
+        return (f"{'⏸ пауза' if state['paused'] else '▶️ работает'}\n{acc}\n"
+                f"модель: {'ждёт очереди ' + str(q) if q else 'свободна' if LLM_SLOTS else 'без очереди'}\n"
                 f"белый список: {', '.join(sorted(CFG['allow'])) or '—'}\n"
                 f"не-контакты: {'да' if CFG['allow_non_contacts'] else 'нет'}\n"
                 f"анонимный чат: {'@' + CFG['anon_bot'] if CFG['anon_bot'] else '—'}\n"
@@ -4108,7 +4210,7 @@ async def on_command(event):
 # Бот слушает локальный сокет state/control.sock (только для твоего пользователя).
 # Протокол — JSON-строки: ub шлёт {"line": "команда"}, бот отвечает {"type": "result", ...};
 # сообщения открытого чата и лог бота приходят сами: {"type": "msg" | "log", ...}.
-CONTROL_SOCK = HERE / "state" / "control.sock"
+CONTROL_SOCK = accounts.control_sock(ACCOUNT)
 CONTROL_CONNS: list[dict] = []   # подключённые ub: {"writer", "chat": User | None}
 _control_server: asyncio.AbstractServer | None = None
 
@@ -4247,13 +4349,13 @@ def acquire_instance_lock() -> None:
     """Refuse to start a second copy: two clients would fight over the session DB
     and answer the same messages twice."""
     global _LOCK_FH
-    path = HERE / "state" / "userbot.lock"
+    path = STATE_DIR / "userbot.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     _LOCK_FH = open(path, "w")
     try:
         fcntl.flock(_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        sys.exit("userbot уже запущен (state/userbot.lock) — второй экземпляр не нужен")
+        sys.exit(f"userbot аккаунта {ACCOUNT} уже запущен ({path}) — второй экземпляр не нужен")
     _LOCK_FH.write(str(os.getpid()))
     _LOCK_FH.flush()
 
@@ -4298,9 +4400,9 @@ async def main() -> None:
         return
     if not CFG["api_id"] or not CFG["api_hash"]:
         sys.exit("Заполни TG_API_ID и TG_API_HASH в .env (https://my.telegram.org → API development tools)")
-    (HERE / "state").mkdir(exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     acquire_instance_lock()
-    session_path = HERE / "state" / "account"
+    session_path = STATE_DIR / "account"
     session = str(session_path)
     for attempt in range(6):
         client = TelegramClient(session, CFG["api_id"], CFG["api_hash"])
@@ -4330,7 +4432,7 @@ async def main() -> None:
     me = await tg(client.get_me(), 60)
     if CFG["anon_bot"]:
         ANON_CHAT_ID = (await tg(client.get_entity(CFG["anon_bot"]), 60)).id
-    print(f"[userbot] вошёл как {display_name(me)} (@{me.username}); "
+    print(f"[userbot:{ACCOUNT}] вошёл как {display_name(me)} (@{me.username}); "
           f"белый список={sorted(CFG['allow']) or '—'}, не-контакты={CFG['allow_non_contacts']}, "
           f"анонимный чат=@{CFG['anon_bot'] or '—'}")
     if CFG["anon_bot"]:

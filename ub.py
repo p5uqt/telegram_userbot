@@ -4,6 +4,8 @@
 ./run.sh   запускает бота в фоне и сразу открывает ub (exit — остановить бота).
 ./ub       подключиться к уже запущенному боту из другого терминала (exit — только выйти).
 ./ub status   одна команда и выход.
+./ub -a work  работать с аккаунтом work (без -a — первый запущенный).
+В ub: accounts — список аккаунтов, use <имя> — переключиться, all <команда> — на всех.
 """
 import json
 import socket
@@ -12,17 +14,38 @@ import threading
 import time
 from pathlib import Path
 
+import accounts
+
 HERE = Path(__file__).resolve().parent
-SOCK = HERE / "state" / "control.sock"
-LOG = HERE / "state" / "userbot.log"
 MAIN = "--main" in sys.argv          # запущен из run.sh: exit останавливает бота
+_ASKED = "--account" in sys.argv or "-a" in sys.argv or any(a.startswith("--account=") for a in sys.argv)
+ACCOUNT = accounts.pop_account_arg(sys.argv)
 ARGS = [a for a in sys.argv[1:] if a != "--main"]
+
+
+def sock_path(name: str) -> Path:
+    return accounts.control_sock(name)
+
+
+def log_path(name: str) -> Path:
+    return accounts.state_dir(name) / "userbot.log"
+
+
+def SOCK() -> Path:  # noqa: N802 — текущий аккаунт меняется командой use
+    return sock_path(state["account"])
+
+
+def LOG() -> Path:  # noqa: N802
+    return log_path(state["account"])
 TTY = sys.stdout.isatty()
 C = {"in": "\033[36m", "bot": "\033[32m", "me": "\033[33m", "sys": "\033[2m", "log": "\033[2m",
      "err": "\033[31m", "off": "\033[0m"} if TTY else dict.fromkeys(
     ("in", "bot", "me", "sys", "log", "err", "off"), "")
 LOCAL_HELP = (
     "\n\nВ ub:\n"
+    "  accounts                     аккаунты: какие запущены, кто текущий\n"
+    "  use <имя>                    переключиться на другой аккаунт\n"
+    "  all <команда>                выполнить на всех запущенных аккаунтах (all pause, all status)\n"
     "  logs [n]                     режим просмотра лога бота (последние n строк + новые), Ctrl+C — назад\n"
     "  clear                        очистить экран\n"
     + ("  exit                         остановить бота и выйти (Ctrl+D — то же)\n" if MAIN else
@@ -31,7 +54,7 @@ LOCAL_HELP = (
       "а в открытом чате с пустой строкой — закрыть чат (как close)")
 
 state = {"chat": None, "chat_id": None, "reading": False, "commands": ["help"], "sock": None,
-         "skip": 0, "quit": False}
+         "skip": 0, "quit": False, "account": ACCOUNT, "switching": False}
 result_ready = threading.Event()
 result_text: list[str] = []
 print_lock = threading.Lock()
@@ -42,7 +65,9 @@ PROMPT_COLOR = "\033[35m" if TTY else ""   # пурпурный — не пут�
 
 def prompt(rl: bool = False) -> str:
     """rl=True — для input(): readline'у нужны \\001…\\002 вокруг escape-кодов, иначе ломается длина строки."""
-    text = f"ub[{state['chat']}]> " if state["chat"] else "ub> "
+    acc = f"{state['account']}" if len(accounts.list_accounts()) > 1 else ""
+    where = "/".join(x for x in (acc, state["chat"] or "") if x)
+    text = f"ub[{where}]> " if where else "ub> "
     if not PROMPT_COLOR:
         return text
     on, off = (f"\001{PROMPT_COLOR}\002", f"\001{C['off']}\002") if rl else (PROMPT_COLOR, C["off"])
@@ -60,13 +85,55 @@ def show(text: str) -> None:
         sys.stdout.flush()
 
 
+def try_connect(name: str) -> socket.socket | None:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(str(sock_path(name)))
+        return s
+    except OSError:
+        s.close()
+        return None
+
+
+def running() -> list[str]:
+    out = []
+    for name in accounts.list_accounts():
+        s = try_connect(name)
+        if s:
+            s.close()
+            out.append(name)
+    return out
+
+
+def oneshot(name: str, line: str, timeout: float = 60) -> str:
+    """Одна команда другому аккаунту по отдельному соединению (для all)."""
+    s = try_connect(name)
+    if not s:
+        return "не запущен"
+    try:
+        s.settimeout(timeout)
+        s.sendall((json.dumps({"line": line}, ensure_ascii=False) + "\n").encode())
+        for raw in s.makefile("r", encoding="utf-8"):
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if msg.get("type") == "result":
+                return msg.get("text", "")
+        return "соединение оборвалось"
+    except OSError as exc:
+        return f"ошибка: {exc}"
+    finally:
+        s.close()
+
+
 def connect(wait: float, quiet: bool = False) -> socket.socket | None:
     """Подключиться к боту; wait — сколько секунд ждать, пока он поднимется."""
     deadline, said = time.time() + wait, False
     while True:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            s.connect(str(SOCK))
+            s.connect(str(SOCK()))
             return s
         except OSError:
             s.close()
@@ -89,7 +156,7 @@ def handle(raw: str) -> None:
         return
     kind = msg.get("type")
     if kind == "hello":
-        state["commands"] = msg.get("commands", []) + ["logs", "clear", "exit"]
+        state["commands"] = msg.get("commands", []) + ["logs", "clear", "exit", "accounts", "use", "all"]
     elif kind == "result":
         if state["skip"]:  # ответ на служебный open после переподключения
             state["skip"] -= 1
@@ -110,6 +177,9 @@ def reader() -> None:
             pass  # бот упал посреди соединения — как обычный обрыв
         if state["quit"]:
             return
+        if state["switching"]:  # use <имя>: новый сокет уже в state["sock"]
+            state["switching"] = False
+            continue
         # бот перезапускается (watchdog / run.sh) — ждём и подключаемся заново
         state["skip"] = 0
         result_text[:] = ["соединение с ботом потеряно"]
@@ -151,10 +221,11 @@ def colorize(text: str) -> str:
 
 def log_mode(n: int) -> None:
     """Как раньше в ./run.sh: лог бота вживую. Ctrl+C — обратно в ub."""
+    LOG = log_path(state["account"])  # noqa: N806
     if not LOG.exists():
         print(f"лога нет ({LOG}) — бот запущен не через ./run.sh?")
         return
-    print(f"{C['sys']}── лог бота ({LOG.name}), Ctrl+C — назад в ub ──{C['off']}")
+    print(f"{C['sys']}── лог бота {state['account']} ({LOG.name}), Ctrl+C — назад в ub ──{C['off']}")
     try:
         with open(LOG, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -173,11 +244,54 @@ def log_mode(n: int) -> None:
         print(f"\n{C['sys']}── назад в ub ──{C['off']}")
 
 
+def accounts_text() -> str:
+    on = set(running())
+    rows = []
+    for name in accounts.list_accounts():
+        mark = "●" if name in on else "○"
+        cur = "  ← текущий" if name == state["account"] else ""
+        note = "" if name in on else ("  (не запущен)" if accounts.has_session(name)
+                                      else f"  (нет входа: ./login.py -a {name} …)")
+        rows.append(f"{mark} {name}{note}{cur}")
+    return "\n".join(rows) or "аккаунтов нет"
+
+
+def switch(name: str) -> str:
+    if name == state["account"]:
+        return f"уже {name}"
+    if name not in accounts.list_accounts():
+        return f"нет аккаунта «{name}» — accounts"
+    s = try_connect(name)
+    if not s:
+        return f"{name} не запущен"
+    old = state["sock"]
+    state["switching"] = True
+    state["account"], state["chat"], state["chat_id"], state["skip"] = name, None, None, 0
+    state["sock"] = s
+    try:
+        old.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    old.close()
+    return f"теперь аккаунт {name}"
+
+
+def run_all(line: str) -> str:
+    on = running()
+    if not on:
+        return "ни один аккаунт не запущен"
+    return "\n\n".join(f"── {name} ──\n{oneshot(name, line)}" for name in on)
+
+
 def main() -> None:
+    if not _ASKED:  # без -a — первый запущенный аккаунт (обычно main)
+        on = running()
+        if on and ACCOUNT not in on:
+            state["account"] = on[0]
     s = connect(90 if MAIN else 0)
     if not s:
         if MAIN:
-            print("бот не запустился за 90 с — смотри state/userbot.log")
+            print(f"бот не запустился за 90 с — смотри {LOG()}")
             log_mode(40)
         sys.exit("бот не запущен: сначала ./run.sh")
     state["sock"] = s
@@ -189,7 +303,7 @@ def main() -> None:
         return
 
     import readline
-    hist = SOCK.parent / "ub_history"
+    hist = accounts.state_dir(accounts.MAIN) / "ub_history"
     try:
         readline.read_history_file(hist)
     except OSError:
@@ -229,6 +343,15 @@ def main() -> None:
             break
         if cmd == "clear":
             print("\033[2J\033[H", end="")
+            continue
+        if cmd == "accounts":
+            print(accounts_text())
+            continue
+        if cmd == "use":
+            print(switch(parts[1]) if len(parts) > 1 else "use <имя> — какой? accounts — список")
+            continue
+        if cmd == "all":
+            print(colorize(run_all(" ".join(parts[1:]))) if len(parts) > 1 else "all <команда>, например all pause")
             continue
         if cmd == "logs":
             log_mode(int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 40)

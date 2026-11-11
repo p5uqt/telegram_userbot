@@ -3,25 +3,33 @@
   login.py +380XXXXXXXXX        -> Telegram sends a code
   login.py code 12345           -> sign in
   login.py password <2FA pass>  -> only if two-step verification is on
+Another account: add -a <name> to every step (login.py -a work +380...) -> accounts/<name>/
 """
 import asyncio
+import os
 import json
 import sys
 
 from telethon import TelegramClient
 from telethon.errors import PasswordHashInvalidError, SessionPasswordNeededError
 
-import userbot as u
+import accounts  # noqa: E402
 
-PENDING = u.HERE / "state" / "login.json"
+# новый аккаунт создаётся при первом входе: login.py -a work ... → папка accounts/work/
+os.environ["UB_ACCOUNT"] = accounts.pop_account_arg(sys.argv)
+accounts.state_dir(os.environ["UB_ACCOUNT"]).mkdir(parents=True, exist_ok=True)
+
+import userbot as u  # noqa: E402
+
+PENDING = u.STATE_DIR / "login.json"
 
 
 async def main() -> None:
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
-    (u.HERE / "state").mkdir(exist_ok=True)
-    client = TelegramClient(str(u.HERE / "state" / "account"), u.CFG["api_id"], u.CFG["api_hash"])
+    print(f"аккаунт: {u.ACCOUNT}")
+    client = TelegramClient(str(u.STATE_DIR / "account"), u.CFG["api_id"], u.CFG["api_hash"])
     await client.connect()
     try:
         if await client.is_user_authorized():
@@ -33,7 +41,7 @@ async def main() -> None:
             try:
                 await client.sign_in(pending["phone"], args[1], phone_code_hash=pending["hash"])
             except SessionPasswordNeededError:
-                print("включена двухфакторка: выполни  login.py password <облачный пароль>")
+                print("включена двухфакторка: выполни  login.py" + (f" -a {u.ACCOUNT}" if u.ACCOUNT != "main" else "") + " password <облачный пароль>")
                 return
         elif args[0] == "password":
             try:
@@ -44,7 +52,7 @@ async def main() -> None:
         else:
             sent = await client.send_code_request(args[0])
             PENDING.write_text(json.dumps({"phone": args[0], "hash": sent.phone_code_hash}))
-            print("код отправлен в Telegram. выполни:  login.py code <код>")
+            print("код отправлен в Telegram. выполни:  login.py" + (f" -a {u.ACCOUNT}" if u.ACCOUNT != "main" else "") + " code <код>")
             return
         me = await client.get_me()
         PENDING.unlink(missing_ok=True)

@@ -15,7 +15,7 @@ async def main() -> None:
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     target, text = sys.argv[1], " ".join(sys.argv[2:])
-    client = TelegramClient(str(u.HERE / "state" / "account"), u.CFG["api_id"], u.CFG["api_hash"])
+    client = TelegramClient(str(u.STATE_DIR / "account"), u.CFG["api_id"], u.CFG["api_hash"])
     await client.connect()
     try:
         if not await client.is_user_authorized():

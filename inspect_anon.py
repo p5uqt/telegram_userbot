@@ -13,7 +13,7 @@ from telethon import TelegramClient  # noqa: E402
 
 async def main() -> None:
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 40
-    session = sys.argv[2] if len(sys.argv) > 2 else str(HERE / "state" / "account")
+    session = sys.argv[2] if len(sys.argv) > 2 else str(userbot.STATE_DIR / "account")
     client = TelegramClient(session, userbot.CFG["api_id"], userbot.CFG["api_hash"])
     await client.start()
     me = await client.get_me()
