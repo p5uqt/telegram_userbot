@@ -45,6 +45,8 @@ def multi() -> bool:
 
 
 GENERAL_CMDS = ["help", "accounts", "use", "all", "logs", "clear", "exit"]
+# команды бота без свободного текста: для них «<команда> all» = «all <команда>»
+ALL_SUFFIX_CMDS = {"restart", "pause", "resume", "status", "media"}
 TTY = sys.stdout.isatty()
 C = {"in": "\033[36m", "bot": "\033[32m", "me": "\033[33m", "sys": "\033[2m", "log": "\033[2m",
      "err": "\033[31m", "off": "\033[0m"} if TTY else dict.fromkeys(
@@ -471,6 +473,10 @@ def main() -> None:
             else:
                 print("аккаунт один — переключаться некуда")
             continue
+        if cmd in ALL_SUFFIX_CMDS and any(x.lower() == "all" for x in parts[1:]):
+            # restart all = all restart (и pause/resume/status…): у этих команд нет текста, «all» не спутать
+            parts = ["all", cmd] + [x for x in parts[1:] if x.lower() != "all"]
+            cmd = "all"
         if cmd == "all" and len(parts) > 1 and parts[1].lower() == "logs":
             cmd, parts = "logs", ["logs", "all"] + parts[2:]   # all logs = logs all
         if cmd == "all":
