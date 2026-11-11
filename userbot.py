@@ -43,6 +43,32 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import accounts  # noqa: E402
 
+LOG_TIME_FMT = "%d.%m %H:%M:%S"
+
+
+class _Stamped:
+    """Время в начале каждой строки лога: «11.11 20:07:49 [userbot] …»."""
+
+    def __init__(self, stream):
+        self._s, self._bol = stream, True
+
+    def write(self, text: str) -> int:
+        out = []
+        for part in text.splitlines(keepends=True):
+            if self._bol and part not in ("\n", ""):
+                out.append(time.strftime(LOG_TIME_FMT) + " ")
+            out.append(part)
+            self._bol = part.endswith("\n")
+        self._s.write("".join(out))
+        return len(text)
+
+    def __getattr__(self, name):  # flush, fileno, isatty, encoding… — как у настоящего потока
+        return getattr(self._s, name)
+
+
+if __name__ == "__main__":   # только сам бот; login.py и прочие импортируют его без меток
+    sys.stdout, sys.stderr = _Stamped(sys.stdout), _Stamped(sys.stderr)
+
 # несколько аккаунтов: --account <имя> (см. accounts.py); без флага — main, как раньше
 ACCOUNT = accounts.pop_account_arg(sys.argv)
 ACC_DIR = accounts.account_dir(ACCOUNT)

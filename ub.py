@@ -8,6 +8,7 @@
 В ub: accounts — список аккаунтов, use <имя> — переключиться, all <команда> — на всех.
 """
 import json
+import re
 import socket
 import sys
 import threading
@@ -243,25 +244,69 @@ def colorize(text: str) -> str:
     return "\n".join(out)
 
 
+_TIME_RE = re.compile(r"^(\d\d)\.(\d\d) (\d\d:\d\d:\d\d) ")
+
+
+def _time_key(line: str) -> tuple:
+    """«11.11 20:07:49 …» → ("11", "11", "20:07:49") для сортировки (месяц, день, время)."""
+    m = _TIME_RE.match(line)
+    return (m.group(2), m.group(1), m.group(3)) if m else ()
+
+
+ACC_COLORS = ["\033[36m", "\033[35m", "\033[33m", "\033[34m", "\033[32m", "\033[91m"] if TTY else [""]
+
+
+class LogView:
+    """Красивый вывод строк лога: «20:07:49  cxbond  текст», дата — разделителем при смене дня."""
+
+    def __init__(self, names: list[str]):
+        self.many = len(names) > 1
+        self.width = max(map(len, names))
+        self.color = {n: ACC_COLORS[i % len(ACC_COLORS)] for i, n in enumerate(names)}
+        self.day = None
+
+    def __call__(self, name: str, line: str) -> str:
+        m = _TIME_RE.match(line)
+        out = ""
+        if m:
+            day = f"{m.group(1)}.{m.group(2)}"
+            if day != self.day:
+                out += f"{C['sys']}── {day} ──{C['off']}\n"
+                self.day = day
+            stamp, text = f"{C['sys']}{m.group(3)}{C['off']}", line[m.end():]
+        else:
+            stamp, text = " " * 8, line   # продолжение многострочной записи / старый лог без времени
+        text = text.rstrip("\n")
+        kind = "in" if " ← " in text else "bot" if re.search(r"\] → ", text) else ""
+        if kind:
+            text = C[kind] + text + C["off"]
+        acc = f"{self.color[name]}[{name}]{C['off']}{' ' * (self.width - len(name))} " if self.many else ""
+        return f"{out}{stamp}  {acc}{text}\n"
+
+
 def log_mode(n: int, every: bool = False) -> None:
-    """Как раньше в ./run.sh: лог бота вживую. every=True — логи всех аккаунтов разом, строки с [имя].
+    """Как раньше в ./run.sh: лог бота вживую. every=True — логи всех аккаунтов разом.
     Ctrl+C — обратно в ub."""
     names = accounts.list_accounts() if every else [state["account"]]
     logs = {name: log_path(name) for name in names if log_path(name).exists()}
     if not logs:
         print(f"лога нет ({log_path(state['account'])}) — бот запущен не через ./run.sh?")
         return
-    many = len(logs) > 1
-    tag = (lambda name: f"{C['sys']}[{name}]{C['off']} ") if many else (lambda name: "")
-    what = f"логи аккаунтов {', '.join(logs)}" if many else f"лог бота {next(iter(logs))}"
+    view = LogView(list(logs))
+    what = f"логи аккаунтов {', '.join(logs)}" if view.many else f"лог бота {next(iter(logs))}"
     print(f"{C['sys']}── {what}, Ctrl+C — назад в ub ──{C['off']}")
     files = {}
     try:
+        backlog = []   # последние n строк каждого лога — вперемешку по времени, как всё и было
         for name, path in logs.items():
             f = open(path, encoding="utf-8", errors="replace")
             files[name] = f
+            key = ()
             for line in f.readlines()[-n:]:
-                sys.stdout.write(tag(name) + line)
+                key = _time_key(line) or key   # строка без времени (старый лог) — вслед за предыдущей
+                backlog.append((key, len(backlog), name, line))
+        for _, _, name, line in sorted(backlog):
+            sys.stdout.write(view(name, line))
         sys.stdout.flush()
         while True:
             idle = True
@@ -269,7 +314,7 @@ def log_mode(n: int, every: bool = False) -> None:
                 line = f.readline()
                 if line:
                     idle = False
-                    sys.stdout.write(tag(name) + line)
+                    sys.stdout.write(view(name, line))
                     sys.stdout.flush()
                 elif logs[name].exists() and logs[name].stat().st_size < f.tell():  # лог обрезали/сменили
                     f.seek(0)

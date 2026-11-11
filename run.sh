@@ -44,10 +44,10 @@ bot_loop() {    # $1 — имя аккаунта
         .venv/bin/python userbot.py --account "$1"
         code=$?
         if [ "$code" -eq 75 ]; then   # команда restart из ub — сразу
-            echo "[run:$1] перезапуск по команде restart" >&2
+            echo "$(date '+%d.%m %H:%M:%S') [run:$1] перезапуск по команде restart" >&2
             continue
         fi
-        echo "[run:$1] userbot завершился (код $code), перезапуск через 5 с..." >&2
+        echo "$(date '+%d.%m %H:%M:%S') [run:$1] userbot завершился (код $code), перезапуск через 5 с..." >&2
         sleep 5
     done
 }
@@ -83,7 +83,7 @@ for n in "${NAMES[@]}"; do
     LOG="$st/userbot.log"
     # каждый запуск — новый лог; предыдущий остаётся в userbot.log.1 (на случай «что было до перезапуска»)
     [ -f "$LOG" ] && mv -f "$LOG" "$LOG.1"
-    echo "[run] старт $(date '+%d.%m %H:%M:%S')" > "$LOG"
+    echo "$(date '+%d.%m %H:%M:%S') [run] старт" > "$LOG"
     bot_loop "$n" >> "$LOG" 2>&1 &
     PIDS+=($!)
 done
