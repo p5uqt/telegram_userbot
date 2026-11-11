@@ -17,6 +17,7 @@ Control from "Saved Messages": .ub status | .ub pause | .ub resume |
 """
 import asyncio
 import base64
+import contextvars
 import fcntl
 import io
 import json
@@ -162,6 +163,11 @@ CFG = {
     "typo_fix_chance": env_float("TYPO_FIX_CHANCE", 0.35),
     # пусто = в анонимном чате не предупреждать (по умолчанию)
     "anon_disclosure": os.environ.get("ANON_DISCLOSURE_TEXT", "").strip(),
+    # после запуска пройти по всем недавним перепискам и дописать их в память (state/contacts).
+    # 0 — не сканировать: память чата обновится, когда в нём придёт новое сообщение или напишешь ты
+    "sync_all": env_str("SYNC_ALL_CONTACTS", default="1") != "0",
+    # кого сканировать при запуске в любом случае (даже при SYNC_ALL_CONTACTS=0): @ник, id, +номер
+    "sync_list": [x.strip() for x in os.environ.get("SYNC_CONTACTS", "").split(",") if x.strip()],
 }
 
 
@@ -1633,9 +1639,34 @@ for _chat in state.get("media_chats", {}).values():
         del _chat[_k]
 
 
+# язык собеседника, которому сейчас готовится ответ: "ru" / "en"; None — без фильтра (твои команды)
+MEDIA_LANG: contextvars.ContextVar[str | None] = contextvars.ContextVar("MEDIA_LANG", default=None)
+_QUOTED_RE = re.compile(r"«([^»]+)»|\"([^\"]+)\"")
+
+
+def media_lang(m: dict, kind: str) -> str | None:
+    """Язык медиа: поле lang из media.toml; для голосовых/кружков без него — по расшифровке в «…»."""
+    lang = str(m.get("lang") or "").strip().lower()
+    if lang:
+        return lang
+    if kind in ("voice", "round"):
+        said = " ".join(a or b for a, b in _QUOTED_RE.findall(str(m.get("about") or "")))
+        cyr, lat = len(re.findall(r"[а-яёіїєґ]", said, re.I)), len(re.findall(r"[a-z]", said, re.I))
+        if cyr + lat >= 10:
+            return "en" if lat > cyr * 3 else "ru"
+    return None
+
+
+def lang_fits(item_lang: str | None, chat_lang: str | None) -> bool:
+    """Английское — только англоязычным, остальное (ru/uk/…) — только не англоязычным; без языка — всем."""
+    return not item_lang or not chat_lang or (item_lang == "en") == (chat_lang == "en")
+
+
 def load_media(kinds: set[str] | None = None) -> dict[str, dict]:
-    """имя (путь от MEDIA_DIR) → {path, kind, about, when, delay}. По умолчанию — только
-    включённые в MEDIA_SEND виды; команды из «Избранного» видят все."""
+    """имя (путь от MEDIA_DIR) → {path, kind, about, when, delay, lang}. По умолчанию — только
+    включённые в MEDIA_SEND виды; команды из «Избранного» видят все. Во время ответа собеседнику —
+    только медиа на его языке (MEDIA_LANG)."""
+    chat_lang = MEDIA_LANG.get()
     kinds = MEDIA_SEND if kinds is None else kinds
     if not kinds or not MEDIA_DIR.is_dir():
         return {}
@@ -1663,12 +1694,15 @@ def load_media(kinds: set[str] | None = None) -> dict[str, dict]:
             when = str(m.get("when") or ("later" if "later" in f.relative_to(base).parts[:-1] else "now")).lower()
             if when == "never":
                 continue
+            lang = media_lang(m, kind)
+            if not lang_fits(lang, chat_lang):
+                continue
             delay = m.get("delay") or MEDIA_LATER
             if isinstance(delay, (int, float)):
                 delay = (delay, delay)
             items[rel] = {"path": f, "kind": kind, "name": rel,
                           "about": str(m.get("about") or f.stem.replace("_", " ")).strip(),
-                          "when": "later" if when == "later" else "now",
+                          "when": "later" if when == "later" else "now", "lang": lang,
                           "delay": (float(delay[0]), float(delay[-1]))}
     return dict(list(items.items())[:60])
 
@@ -2049,6 +2083,11 @@ def _load_whisper():
 
 
 def _transcribe(raw: bytes) -> str:
+    return _transcribe_lang(raw)[0]
+
+
+def _transcribe_lang(raw: bytes) -> tuple[str, str | None]:
+    """Текст + язык, который определил whisper (или WHISPER_LANGUAGE, если задан)."""
     import numpy as np  # noqa: PLC0415
     # PyAV в faster-whisper капризничает с версиями — декодируем системным ffmpeg
     # через файл, а не pipe: у видео/кружков служебный блок mp4 часто в конце файла,
@@ -2061,12 +2100,13 @@ def _transcribe(raw: bytes) -> str:
              "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
             capture_output=True, check=True, timeout=120).stdout
     audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
-    segs, _ = _load_whisper().transcribe(
+    segs, info = _load_whisper().transcribe(
         audio, language=WHISPER_LANG, beam_size=1, vad_filter=True, condition_on_previous_text=False,
         initial_prompt="Привет, ну короче, слушай. Да, норм, а ты как?")
     # куски, где модель «уверена», что речи нет, и зацикленный мусор — выбрасываем
     text = " ".join(x.text.strip() for x in segs if x.no_speech_prob < 0.6).strip()
-    return "" if looks_hallucinated(text) else text
+    lang = WHISPER_LANG or (info.language if getattr(info, "language_probability", 0) >= 0.6 else None)
+    return ("", None) if looks_hallucinated(text) else (text, lang if text else None)
 
 
 async def load_voice(m) -> None:
@@ -2167,7 +2207,7 @@ def _describe_voices_sync() -> list[str]:
             if rel.lower() in known or f.name.lower() in known:
                 continue
             try:
-                text = _transcribe(f.read_bytes())
+                text, lang = _transcribe_lang(f.read_bytes())
             except Exception as exc:  # noqa: BLE001
                 print(f"[медиа] {rel}: не расшифровал ({exc})", file=sys.stderr)
                 continue
@@ -2175,11 +2215,12 @@ def _describe_voices_sync() -> list[str]:
                 text = text[:300].rsplit(" ", 1)[0] + "…"
             about = f"говорю: «{text}»" if text else "голосовое, речь не распознана — опиши сам"
             block = (f"\n[[media]]\nfile  = {json.dumps(rel, ensure_ascii=False)}\n"
-                     f"about = {json.dumps(about, ensure_ascii=False)}   # расшифровано автоматически — проверь\n")
+                     f"about = {json.dumps(about, ensure_ascii=False)}   # расшифровано автоматически — проверь\n"
+                     + (f"lang  = {json.dumps(lang)}\n" if lang else ""))
             with open(MEDIA_DIR / "media.toml", "a", encoding="utf-8") as fh:
                 fh.write(block)
             known.add(rel.lower())
-            done.append(f"{rel}: {about}")
+            done.append(f"{rel} [{lang or '?'}]: {about}")
     return done
 
 
@@ -3303,6 +3344,7 @@ async def respond(chat_id: int, user: User) -> None:
                          r"|чем\s+(?:(?:ты|щас|сейчас)\s+)*(?:занят|занимаешься\s+(?:щас|сейчас))"
                          r"|\bwyd\b|what(?:'re| are)? (?:you|u) (?:doing|up to)", last_text, re.I)
     pending = unanswered(history)
+    MEDIA_LANG.set("en" if is_english(history) else "ru")   # медиа — только на языке собеседника
     if not anon:
         await sync_contact(chat_id, user)
     known = bool(contact_profiles.get(name))
@@ -3963,6 +4005,25 @@ def schedule_contact_sync(chat_id: int, delay: float = 5) -> None:
     _sync_tasks[chat_id] = asyncio.create_task(run())
 
 
+async def sync_one(user: User) -> int:
+    """Дописать в память переписку с одним человеком; сколько сообщений добавилось."""
+    before = len(load_contact(user.id)["log"])
+    data = await sync_contact(user.id, user)
+    schedule_summary(user.id, user)
+    return len(data["log"]) - before
+
+
+async def sync_listed_contacts() -> None:
+    """SYNC_CONTACTS из .env — эти чаты сканируем при запуске всегда."""
+    for ref in CFG["sync_list"]:
+        user, err = await resolve_chat_ex(ref)
+        if not user or is_anon_bot(user):
+            print(f"[memory] SYNC_CONTACTS: {ref} — {err or 'анонимный чат не сканируется'}", file=sys.stderr)
+            continue
+        n = await sync_one(user)
+        print(f"[memory] {display_name(user)}: дописал в память {n} сообщ.")
+
+
 async def sync_all_contacts(max_age_hours: float = 72) -> None:
     """После запуска: дописать в файлы всё, что было в чатах, пока бот был выключен,
     включая то, что ты писал сам."""
@@ -3998,6 +4059,7 @@ COMMANDS = [
     ("forget", "[кто]", "отменить указание", False),
     ("info", "[кто]", "сведения о человеке из памяти (шапка state/contacts/<id>.md); без <кто> — список всех", False),
     ("note", "[кто] [текст]", "память о человеке: запомнить/исправить/забыть факт или установку; ему ничего не пишет", False),
+    ("sync", "[кто]", "дописать в память переписку с человеком сейчас (то, что было без бота); ему ничего не пишет", False),
     ("write", "[кто] <текст>", "написать сообщение от себя (бот уступит тебе на TAKEOVER_MINUTES)", False),
     ("send", "[кто] <файл>", "сразу отправить медиа из media/ без модели", False),
     ("media", "", "список медиа с описаниями", False),
@@ -4286,6 +4348,15 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         state["muted"] = sorted(set(state["muted"]) | {uid}) if cmd == "mute" else [x for x in state["muted"] if x != uid]
         save_state()
         return f"🔇 {who_name(user)} — больше не отвечаю" if cmd == "mute" else f"🔈 {who_name(user)} — снова отвечаю"
+    if cmd == "sync":
+        user, _, err = await _target(args, current, False)
+        if err:
+            return err
+        if is_anon_bot(user):
+            return "в анонимном чате памяти нет — там каждый раз новый человек"
+        n = await sync_one(user)
+        return (f"🧠 {who_name(user)}: дописал в память {n} сообщ." if n
+                else f"🧠 {who_name(user)}: нового нет, память и так полная")
     if cmd == "info":
         if not args and current is None:
             return contacts_overview()
@@ -4601,7 +4672,13 @@ async def main() -> None:
     if CFG["anon_bot"]:
         spawn(anon_idle_watch())
     await catch_up()
-    spawn(sync_all_contacts())
+    if CFG["sync_all"]:
+        spawn(sync_all_contacts())
+    else:
+        print("[memory] SYNC_ALL_CONTACTS=0 — все переписки после запуска не сканирую"
+              + (f", только SYNC_CONTACTS ({len(CFG['sync_list'])})" if CFG["sync_list"] else ""))
+    if CFG["sync_list"]:
+        spawn(sync_listed_contacts())
     await start_control_server()
     await client.run_until_disconnected()
     if RESTART["exit"]:

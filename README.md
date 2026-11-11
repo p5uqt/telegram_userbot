@@ -234,6 +234,8 @@ Everything else goes into `persona.md` (see below).
 | `TG_TIMEOUT_SECONDS` | `60` | timeout for Telegram requests |
 | `WORKER_MAX_SECONDS` | `900` | a reply "hanging" longer than this is dropped and regenerated once |
 | `MEMORY_SUMMARY_EVERY` | `10` | after how many new messages to update the note about a person |
+| `SYNC_ALL_CONTACTS` | `1` | after start, go through all recent chats (up to 200) and add what happened while the bot was off to memory; `0` — don't scan, a chat's memory updates when a new message arrives in it |
+| `SYNC_CONTACTS` | empty | who to scan on start anyway, even with `SYNC_ALL_CONTACTS=0`: `@nick`, id, `+phone`, comma-separated. Manually — the `sync <who>` command |
 
 For testing, it's handy to set `READ_DELAY_MIN=0`, `READ_DELAY_MAX=0`, `QUIET_SECONDS=0`.
 
@@ -457,6 +459,7 @@ ub[Masha (@masha)]> exit      # stop the bot
 | `tell [who] <text>` | instruction for the bot: a topic, a question, "send a photo of the cat" |
 | `forget [who]` | cancel the instruction |
 | `note [who] [text]` | memory about a person: remember / correct / forget a fact or a standing directive; nothing is sent to them. Without text — show the memory |
+| `sync [who]` | add the conversation with a person to memory right now (what happened without the bot); nothing is sent to them |
 | `write [who] <text>` | send a message yourself (the bot yields the chat for `TAKEOVER_MINUTES`) |
 | `send [who] <file>` | send media from `media/` right away, without the model |
 | `media` | list of media with descriptions |
@@ -647,6 +650,7 @@ when  = "never"                          # don't send
 | `about` | what's in the photo/video or what you say in the voice/video message. Without it the bot knows only the file name |
 | `when` | `now` — right away when asked or when it fits (default); `later` — stall; `never` — don't send |
 | `delay` | for `later`: `[min, max]` minutes until sending (otherwise `MEDIA_LATER_MIN/MAX`) |
+| `lang` | media language: `ru`, `en`, `uk`… English media goes only to people who write in English, the rest only to people who don't; without `lang` — to everyone |
 
 A file without an entry in `media.toml` works too: description = file name, `when` = `now`
 (or `later` if it's in a `later/` subfolder).
@@ -659,7 +663,11 @@ without an entry in `media.toml`, transcribes them and appends an entry to the e
 file  = "voice/bus.ogg"
 about = "говорю: «привет, я щас в автобусе, не могу писать»"   # расшифровано автоматически — проверь
 ```
-(`говорю` = "I say"; the comment means "auto-transcribed — check it".) Check the text and fix it or add `when`
+(`говорю` = "I say"; the comment means "auto-transcribed — check it".) Whisper detects the language itself and writes it to `lang` (when confident). So you can keep
+Russian and English voice messages in one folder: the bot offers each person only voice messages in their language
+(by their latest message). For older entries without `lang`, the language of a voice/video message is guessed
+from the text in «quotes» in `about`.
+Check the text and fix it or add `when`
 if you like. Entries you wrote yourself are never touched; to re-transcribe a file, delete its entry.
 Describe photos, videos and video messages yourself.
 
