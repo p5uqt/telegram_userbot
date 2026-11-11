@@ -3154,6 +3154,10 @@ def strip_leading_laughs(text: str) -> str:
 
 
 _FANCY_QUOTES = re.compile("[«»“”„‟]")
+# приветствие (+ обращение до двух слов) и «!» после него; group(2) — первая буква продолжения на той же строке
+_GREET_BANG_RE = re.compile(
+    r"(?<!\w)((?:привет\w*|прив|хай|здаров\w*|здравствуй\w*|салют|ку|добр\w+ (?:утро|день|вечер|ночи)|"
+    r"hi|hey|hello)(?-i:[ ,]+[A-ZА-ЯЁ][\w-]*){0,2})[ \t]*!+(?:[ \t]+(\S))?", re.I)
 _LOL_RE = re.compile(r"[ \t,]*\b(?:lol|лол)\b", re.I)
 
 
@@ -3198,6 +3202,8 @@ def humanize(text: str) -> str:
         text = no_lol if re.search(r"\w", no_lol) else "ахах"
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r" *\n *", "\n", text)
+    # «Привет!» — по-ботски восторженно: в переписке пишут «привет, как дела» или «привет» строкой
+    text = _GREET_BANG_RE.sub(lambda m: m.group(1) + (", " + m.group(2).lower() if m.group(2) else ""), text)
     # точка в конце сообщения в мессенджере выглядит холодно/по-ботски — убираем
     text = re.sub(r"\.+\s*$", "", text)
     # «как оно?» звучит заумно — по-простому
