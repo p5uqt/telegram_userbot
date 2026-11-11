@@ -32,11 +32,18 @@ def log_path(name: str) -> Path:
 
 
 def SOCK() -> Path:  # noqa: N802 — текущий аккаунт меняется командой use
-    return sock_path(state["account"])
+    return sock_path(state["account"] or accounts.MAIN)
 
 
 def LOG() -> Path:  # noqa: N802
-    return log_path(state["account"])
+    return log_path(state["account"] or accounts.MAIN)
+
+
+def multi() -> bool:
+    return len(accounts.list_accounts()) > 1
+
+
+GENERAL_CMDS = ["help", "accounts", "use", "all", "logs", "clear", "exit"]
 TTY = sys.stdout.isatty()
 C = {"in": "\033[36m", "bot": "\033[32m", "me": "\033[33m", "sys": "\033[2m", "log": "\033[2m",
      "err": "\033[31m", "off": "\033[0m"} if TTY else dict.fromkeys(
@@ -44,9 +51,11 @@ C = {"in": "\033[36m", "bot": "\033[32m", "me": "\033[33m", "sys": "\033[2m", "l
 LOCAL_HELP = (
     "\n\nВ ub:\n"
     "  accounts                     аккаунты: какие запущены, кто текущий\n"
-    "  use <имя>                    переключиться на другой аккаунт\n"
+    "  use <имя>                    перейти в аккаунт (ub[имя]>); use без имени — назад в общий режим (ub>)\n"
     "  all <команда>                выполнить на всех запущенных аккаунтах (all pause, all status)\n"
-    "  logs [n]                     режим просмотра лога бота (последние n строк + новые), Ctrl+C — назад\n"
+    "  logs [n]                     лог вживую (последние n строк + новые), Ctrl+C — назад:\n"
+    "                               в общем режиме — всех аккаунтов (строки с [имя]), в аккаунте — только его\n"
+    "  logs all [n]                 логи всех аккаунтов, даже если ты в каком-то аккаунте\n"
     "  clear                        очистить экран\n"
     + ("  exit                         остановить бота и выйти (Ctrl+D — то же)\n" if MAIN else
        "  exit                         выйти из ub, бот продолжит работать (Ctrl+D — то же)\n")
@@ -65,7 +74,7 @@ PROMPT_COLOR = "\033[35m" if TTY else ""   # пурпурный — не пут�
 
 def prompt(rl: bool = False) -> str:
     """rl=True — для input(): readline'у нужны \\001…\\002 вокруг escape-кодов, иначе ломается длина строки."""
-    acc = f"{state['account']}" if len(accounts.list_accounts()) > 1 else ""
+    acc = f"{state['account']}" if state["account"] and multi() else ""
     where = "/".join(x for x in (acc, state["chat"] or "") if x)
     text = f"ub[{where}]> " if where else "ub> "
     if not PROMPT_COLOR:
@@ -170,28 +179,41 @@ def handle(raw: str) -> None:
 
 def reader() -> None:
     while not state["quit"]:
+        sock = state["sock"]
+        if sock is None:  # общий режим — ни к какому аккаунту не подключены
+            time.sleep(0.2)
+            continue
         try:
-            for raw in state["sock"].makefile("r", encoding="utf-8"):
+            for raw in sock.makefile("r", encoding="utf-8"):
                 handle(raw)
         except OSError:
             pass  # бот упал посреди соединения — как обычный обрыв
         if state["quit"]:
             return
-        if state["switching"]:  # use <имя>: новый сокет уже в state["sock"]
+        if state["switching"]:  # use: новый сокет (или None) уже в state["sock"]
             state["switching"] = False
             continue
         # бот перезапускается (watchdog / run.sh) — ждём и подключаемся заново
+        acc = state["account"]
         state["skip"] = 0
         result_text[:] = ["соединение с ботом потеряно"]
         result_ready.set()
-        show(C["err"] + "бот перезапускается — переподключаюсь…" + C["off"])
-        s = connect(120, quiet=True)
-        if not s:
-            show(C["err"] + "бот так и не поднялся (logs — посмотреть почему)" + C["off"])
-            while not state["quit"] and not (s := connect(60, quiet=True)):
-                pass
-            if not s:
-                return
+        show(C["err"] + f"бот {acc} перезапускается — переподключаюсь…" + C["off"])
+        s = None
+        deadline, warned = time.time() + 120, False
+        while not state["quit"] and not state["switching"] and state["account"] == acc:
+            s = try_connect(acc)
+            if s:
+                break
+            if not warned and time.time() > deadline:
+                show(C["err"] + f"бот {acc} так и не поднялся (logs — посмотреть почему)" + C["off"])
+                warned = True
+            time.sleep(0.5)
+        if state["quit"]:
+            return
+        if not s:  # пока ждали, ты перешёл в другой аккаунт / общий режим
+            state["switching"] = False
+            continue
         state["sock"] = s
         if state["chat_id"]:
             state["skip"] += 1
@@ -200,6 +222,8 @@ def reader() -> None:
 
 
 def request(line: str) -> str:
+    if state["sock"] is None:
+        return "сейчас общий режим — выбери аккаунт: use <имя> (accounts — список) или all <команда>"
     result_ready.clear()
     try:
         send(line)
@@ -219,29 +243,43 @@ def colorize(text: str) -> str:
     return "\n".join(out)
 
 
-def log_mode(n: int) -> None:
-    """Как раньше в ./run.sh: лог бота вживую. Ctrl+C — обратно в ub."""
-    LOG = log_path(state["account"])  # noqa: N806
-    if not LOG.exists():
-        print(f"лога нет ({LOG}) — бот запущен не через ./run.sh?")
+def log_mode(n: int, every: bool = False) -> None:
+    """Как раньше в ./run.sh: лог бота вживую. every=True — логи всех аккаунтов разом, строки с [имя].
+    Ctrl+C — обратно в ub."""
+    names = accounts.list_accounts() if every else [state["account"]]
+    logs = {name: log_path(name) for name in names if log_path(name).exists()}
+    if not logs:
+        print(f"лога нет ({log_path(state['account'])}) — бот запущен не через ./run.sh?")
         return
-    print(f"{C['sys']}── лог бота {state['account']} ({LOG.name}), Ctrl+C — назад в ub ──{C['off']}")
+    many = len(logs) > 1
+    tag = (lambda name: f"{C['sys']}[{name}]{C['off']} ") if many else (lambda name: "")
+    what = f"логи аккаунтов {', '.join(logs)}" if many else f"лог бота {next(iter(logs))}"
+    print(f"{C['sys']}── {what}, Ctrl+C — назад в ub ──{C['off']}")
+    files = {}
     try:
-        with open(LOG, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-            sys.stdout.write("".join(lines[-n:]))
-            sys.stdout.flush()
-            while True:
+        for name, path in logs.items():
+            f = open(path, encoding="utf-8", errors="replace")
+            files[name] = f
+            for line in f.readlines()[-n:]:
+                sys.stdout.write(tag(name) + line)
+        sys.stdout.flush()
+        while True:
+            idle = True
+            for name, f in files.items():
                 line = f.readline()
                 if line:
-                    sys.stdout.write(line)
+                    idle = False
+                    sys.stdout.write(tag(name) + line)
                     sys.stdout.flush()
-                else:
-                    if LOG.exists() and LOG.stat().st_size < f.tell():  # лог обрезали/сменили
-                        f.seek(0)
-                    time.sleep(0.2)
+                elif logs[name].exists() and logs[name].stat().st_size < f.tell():  # лог обрезали/сменили
+                    f.seek(0)
+            if idle:
+                time.sleep(0.2)
     except KeyboardInterrupt:
         print(f"\n{C['sys']}── назад в ub ──{C['off']}")
+    finally:
+        for f in files.values():
+            f.close()
 
 
 def accounts_text() -> str:
@@ -256,24 +294,30 @@ def accounts_text() -> str:
     return "\n".join(rows) or "аккаунтов нет"
 
 
-def switch(name: str) -> str:
+def switch(name: str | None) -> str:
+    """Перейти в аккаунт name; None — в общий режим (ни к кому не подключены)."""
     if name == state["account"]:
-        return f"уже {name}"
-    if name not in accounts.list_accounts():
-        return f"нет аккаунта «{name}» — accounts"
-    s = try_connect(name)
-    if not s:
-        return f"{name} не запущен"
+        return f"уже {name}" if name else "уже общий режим"
+    s = None
+    if name is not None:
+        if name not in accounts.list_accounts():
+            return f"нет аккаунта «{name}» — accounts"
+        s = try_connect(name)
+        if not s:
+            return f"{name} не запущен"
     old = state["sock"]
-    state["switching"] = True
+    state["switching"] = old is not None   # reader читает старый сокет — пусть просто перейдёт на новый
     state["account"], state["chat"], state["chat_id"], state["skip"] = name, None, None, 0
     state["sock"] = s
-    try:
-        old.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass
-    old.close()
-    return f"теперь аккаунт {name}"
+    state["commands"] = GENERAL_CMDS if s is None else state["commands"]
+    if old is not None:
+        try:
+            old.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        old.close()
+    return f"теперь аккаунт {name} (logs — его лог; use — назад в общий режим)" if name else \
+        "общий режим: logs — все аккаунты, use <имя> — перейти в аккаунт"
 
 
 def run_all(line: str) -> str:
@@ -283,18 +327,41 @@ def run_all(line: str) -> str:
     return "\n\n".join(f"── {name} ──\n{oneshot(name, line)}" for name in on)
 
 
-def main() -> None:
-    if not _ASKED:  # без -a — первый запущенный аккаунт (обычно main)
+def wait_any(wait: float) -> list[str]:
+    """Ждём, пока поднимется хоть один аккаунт (из run.sh они стартуют чуть позже ub)."""
+    deadline, said = time.time() + wait, False
+    while True:
         on = running()
-        if on and ACCOUNT not in on:
-            state["account"] = on[0]
-    s = connect(90 if MAIN else 0)
-    if not s:
-        if MAIN:
-            print(f"бот не запустился за 90 с — смотри {LOG()}")
-            log_mode(40)
-        sys.exit("бот не запущен: сначала ./run.sh")
-    state["sock"] = s
+        if on or time.time() >= deadline:
+            return on
+        if not said and wait > 3:
+            print(f"{C['sys']}жду, пока боты запустятся… (logs — посмотреть, что они пишут){C['off']}")
+            said = True
+        time.sleep(0.5)
+
+
+def main() -> None:
+    general = multi() and not _ASKED and not ARGS   # несколько аккаунтов — стартуем в общем режиме
+    if general:
+        on = wait_any(90 if MAIN else 0)
+        if not on:
+            if MAIN:
+                print("боты не запустились за 90 с — смотри логи:")
+                log_mode(40, every=True)
+            sys.exit("боты не запущены: сначала ./run.sh")
+        state["account"], state["commands"] = None, GENERAL_CMDS
+    else:
+        if not _ASKED:  # без -a — первый запущенный аккаунт (обычно main)
+            on = running()
+            if on and ACCOUNT not in on:
+                state["account"] = on[0]
+        s = connect(90 if MAIN else 0)
+        if not s:
+            if MAIN:
+                print(f"бот не запустился за 90 с — смотри {LOG()}")
+                log_mode(40)
+            sys.exit("бот не запущен: сначала ./run.sh")
+        state["sock"] = s
     threading.Thread(target=reader, daemon=True).start()
 
     if ARGS:  # ./ub status — одна команда
@@ -311,8 +378,12 @@ def main() -> None:
     readline.set_completer(lambda text, i: ([n + " " for n in state["commands"] if n.startswith(text)]
                                             + [None])[i] if readline.get_begidx() == 0 else None)
     readline.parse_and_bind("tab: complete")
-    print(f"{C['sys']}бот работает. help — команды, logs — лог бота, "
-          f"{'exit — остановить бота' if MAIN else 'exit — выйти (бот продолжит работать)'}{C['off']}")
+    stop = "exit — остановить ботов" if MAIN else "exit — выйти (боты продолжат работать)"
+    if general:
+        print(f"{C['sys']}работают аккаунты: {', '.join(running())}. use <имя> — перейти в аккаунт, "
+              f"logs — общий лог, help — команды, {stop}{C['off']}")
+    else:
+        print(f"{C['sys']}бот работает. help — команды, logs — лог бота, {stop}{C['off']}")
     while True:
         try:
             state["reading"] = True
@@ -348,13 +419,27 @@ def main() -> None:
             print(accounts_text())
             continue
         if cmd == "use":
-            print(switch(parts[1]) if len(parts) > 1 else "use <имя> — какой? accounts — список")
+            if len(parts) > 1:
+                print(switch(parts[1]))
+            elif multi():
+                print(switch(None))
+            else:
+                print("аккаунт один — переключаться некуда")
             continue
+        if cmd == "all" and len(parts) > 1 and parts[1].lower() == "logs":
+            cmd, parts = "logs", ["logs", "all"] + parts[2:]   # all logs = logs all
         if cmd == "all":
             print(colorize(run_all(" ".join(parts[1:]))) if len(parts) > 1 else "all <команда>, например all pause")
             continue
         if cmd == "logs":
-            log_mode(int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 40)
+            nums = [int(x) for x in parts[1:] if x.isdigit()]
+            every = state["account"] is None or any(x.lower() == "all" for x in parts[1:])
+            log_mode(nums[0] if nums else 40, every=every)
+            continue
+        if state["sock"] is None and cmd in ("help", "h", "?"):
+            print("общий режим (ub>) — здесь работают:" + LOCAL_HELP.split("В ub:", 1)[1]
+                  + "\n\nКоманды бота (status, chats, open, tell, restart…) — внутри аккаунта: use <имя>, "
+                    "там help покажет их все. Или сразу всем: all <команда>.")
             continue
         text = request(line)
         if cmd in ("help", "h", "?") and len(parts) == 1:

@@ -90,5 +90,5 @@ done
 echo "запущены аккаунты: ${NAMES[*]}"
 trap ':' INT   # Ctrl+C — для ub (стереть строку / выйти из logs), а не остановка всего
 
-.venv/bin/python ub.py --main -a "${NAMES[0]}"
+.venv/bin/python ub.py --main   # несколько аккаунтов — общий режим ub>, один — сразу он
 echo "боты остановлены"

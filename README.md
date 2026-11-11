@@ -440,9 +440,11 @@ ub[Masha (@masha)]> exit      # stop the bot
 
 - `./ub` — connect to an already running bot from **another** terminal (there `exit` closes
   only `ub`, the bot keeps running). `./ub status` — one command and exit.
-- **Several accounts**: `ub` works with one account at a time (its name is in the prompt:
-  `ub[work]>`, and `logs` shows its log). `accounts` — list and which are running, `use work` —
-  switch, `all <command>` — run on all at once (`all pause`, `all restart`), `./ub -a work status` —
+- **Several accounts**: `ub` starts in **general mode** (`ub>`): there `logs` is the combined log of all
+  accounts (lines tagged `[name]`), `accounts` — list and which are running, `all <command>` — run on all
+  at once (`all pause`, `all restart`). `use work` — enter an account (`ub[work]>`): now `logs` shows only its
+  log, and `chats`, `open`, `tell` and the other bot commands apply to it; `logs all` — still all of them.
+  `use` without a name — back to general mode. `./ub -a work` — straight into an account, `./ub -a work status` —
   one command for a specific account. `restart` restarts only the current account: after changing
   code, the shared `.env` or the shared personality use `all restart` (each one waits for its own replies).
 - `./run.sh --log` — the old mode: no `ub`, the whole log straight to the terminal. `run.sh` also
@@ -467,9 +469,10 @@ ub[Masha (@masha)]> exit      # stop the bot
 | `pause` / `resume` | stop / resume auto-replies; after `resume` the bot answers what came in during the pause (no older than a day) |
 | `mute [who]` / `unmute [who]` | don't reply to a specific person |
 | `accounts` | list of accounts: which are running, which is current |
-| `use <name>` | switch `ub` to another account |
+| `use [name]` | enter an account; without a name — back to general mode `ub>` |
 | `all <command>` | run a command on all running accounts (`all pause`, `all status`) |
-| `logs [n]` | view the current account's log: last n lines (40 by default) and new ones live; Ctrl+C — back |
+| `logs [n]` | live log: last n lines (40 by default) and new ones; in general mode — all accounts, inside an account — only its own; Ctrl+C — back |
+| `logs all [n]` | logs of all accounts, even from inside an account |
 | `clear` | clear the screen |
 | `exit` | from `./run.sh` — stop the bots of all accounts; from `./ub` — just leave (Ctrl+D — same) |
 
