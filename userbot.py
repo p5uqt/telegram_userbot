@@ -839,6 +839,17 @@ def is_bot_msg(chat_id: int, msg_id: int) -> bool:
     return msg_id in state["bot_ids"].get(str(chat_id), [])
 
 
+def bot_sent(chat_id: int, msg) -> None:
+    """Пометить сообщение как отправленное ботом и показать его в ub, где этот чат открыт.
+    Telegram не присылает событий о сообщениях, которые отправил сам этот клиент, поэтому
+    on_watch их не видит — шлём в ub отсюда."""
+    remember_bot_msg(chat_id, msg.id)
+    try:
+        watch_push(chat_id, msg)
+    except Exception as exc:  # noqa: BLE001 — показ в ub не должен ломать отправку
+        print(f"[ub] не показал сообщение бота: {exc}", file=sys.stderr)
+
+
 # ── harness ──────────────────────────────────────────────────────────────────
 
 def rules(disclosure_note: str, seed: str = "") -> str:
@@ -1539,7 +1550,7 @@ async def do_file_actions(chat_id: int, acts: list[tuple], name: str, anon: bool
             async with client.action(chat_id, "document"):
                 await asyncio.sleep(random.uniform(0.5, 1.5))
             msg = await client.send_file(chat_id, str(path), force_document=True)
-            remember_bot_msg(chat_id, msg.id)
+            bot_sent(chat_id, msg)
             doc_cache[msg.id] = read_text_file(path)
             sent_log.setdefault(chat_id, []).append(time.time())
             print(f"[{chat_id}] → файл {path.name}" + (" (создан)" if act[0] == "create" else ""))
@@ -1691,6 +1702,26 @@ def media_status(chat_id: int) -> str:
         parts.append(f"Ты уже пообещал и скоро отправится само: {', '.join(wait)} - не шли снова, "
                      "если торопит - «щас, погоди».")
     return " ".join(parts)
+
+
+def media_ask_note(chat_id: int, asked: set[str] | None) -> str:
+    """Подсказка к конкретной просьбе: что именно он просит и какие файлы ЭТОГО вида у тебя есть.
+    Без неё модель путается (на «скинь фото» ставит тег видео или голосового)."""
+    if asked is None or not MEDIA_SEND:
+        return ""
+    kinds = (asked & MEDIA_SEND) if asked else set(MEDIA_SEND)
+    what = ", ".join(MEDIA_KIND_RU[k] for k in MEDIA_KINDS if k in asked) or "что-нибудь (вид не уточнил)"
+    done = media_sent_in(chat_id)
+    items = [(rel, it) for rel, it in load_media(kinds).items() if not done.get(it["name"])] if kinds else []
+    if not items:
+        return (f"Он просит прислать {what}. Подходящего ({what}) у тебя нет или уже отправлено - "
+                "не подсовывай вместо этого другое (видео/голосовое вместо фото и т.п.), "
+                "отмажься текстом по-человечески.")
+    lst = "; ".join(f"[медиа: {rel}] - {it['about']}" + (" (потяни время)" if it["when"] == "later" else "")
+                    for rel, it in items)
+    return (f"Он просит прислать {what}. Подходят ТОЛЬКО эти твои файлы: {lst}. "
+            "Если по описанию один из них - то, что он просит, поставь его тег. Если просит другое "
+            "(не то, что на них) - не ставь тег, отмажься текстом. Файлы другого вида не предлагай.")
 
 
 def media_note(kinds: set[str] | None = None) -> str:
@@ -1870,6 +1901,13 @@ async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | 
         state["media_msgs"].pop(k, None)
     sent_log.setdefault(chat_id, []).append(time.time())
     save_state()
+    if any(c["chat"] and c["chat"].id == chat_id for c in CONTROL_CONNS):
+        try:
+            sent = await tg(client.get_messages(chat_id, ids=msg_id))
+            if sent:
+                watch_push(chat_id, sent)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ub] не показал медиа бота: {exc}", file=sys.stderr)
     print(f"[{chat_id}] → {MEDIA_KIND_RU[it['kind']]} {it['name']}" + (f" + «{caption}»" if caption else ""))
     if caption and it["kind"] in ("voice", "round"):
         # к голосовому/кружку подпись не цепляют — пишут после, отдельным сообщением
@@ -2086,6 +2124,74 @@ async def preload_whisper() -> None:
             print(f"[voice] whisper «{WHISPER_MODEL}» готов")
         except Exception as exc:  # noqa: BLE001
             print(f"[voice] whisper не загрузился ({exc}) — голосовые не расшифровываю", file=sys.stderr)
+
+
+# ── свои голосовые: расшифровка в media.toml ────────────────────────────────
+# Бот сам свои медиа не слушает — знает о них только about из media.toml. Голосовые без записи
+# там расшифровываем whisper'ом и дописываем запись в конец файла (проверь и поправь при желании).
+
+def _media_toml_files() -> set[str]:
+    """Какие файлы уже упомянуты в media.toml (путь и просто имя, в нижнем регистре)."""
+    mf = MEDIA_DIR / "media.toml"
+    if not mf.exists():
+        return set()
+    import tomllib  # noqa: PLC0415
+    with open(mf, "rb") as fh:
+        items = tomllib.load(fh).get("media", [])
+    out = set()
+    for it in items:
+        f = str(it.get("file") or "").strip().lower()
+        if f:
+            out |= {f, f.rsplit("/", 1)[-1]}
+    return out
+
+
+def _describe_voices_sync() -> list[str]:
+    base = MEDIA_DIR / "voice"
+    if not base.is_dir():
+        return []
+    (MEDIA_DIR / ".cache").mkdir(exist_ok=True)
+    done = []
+    # папка media/ бывает общей у нескольких аккаунтов — дописываем по очереди
+    with open(MEDIA_DIR / ".cache" / "media_toml.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            known = _media_toml_files()
+        except Exception as exc:  # noqa: BLE001 — сломанный toml не перезаписываем
+            print(f"[медиа] media.toml не читается, расшифровку пропускаю: {exc}", file=sys.stderr)
+            return []
+        for f in sorted(base.rglob("*")):
+            if not f.is_file() or f.name.startswith(".") or f.suffix.lower() not in _MEDIA_EXT["voice"]:
+                continue
+            rel = f.relative_to(MEDIA_DIR).as_posix()
+            if rel.lower() in known or f.name.lower() in known:
+                continue
+            try:
+                text = _transcribe(f.read_bytes())
+            except Exception as exc:  # noqa: BLE001
+                print(f"[медиа] {rel}: не расшифровал ({exc})", file=sys.stderr)
+                continue
+            if len(text) > 300:   # список медиа идёт в каждый промпт — длинное не тащим целиком
+                text = text[:300].rsplit(" ", 1)[0] + "…"
+            about = f"говорю: «{text}»" if text else "голосовое, речь не распознана — опиши сам"
+            block = (f"\n[[media]]\nfile  = {json.dumps(rel, ensure_ascii=False)}\n"
+                     f"about = {json.dumps(about, ensure_ascii=False)}   # расшифровано автоматически — проверь\n")
+            with open(MEDIA_DIR / "media.toml", "a", encoding="utf-8") as fh:
+                fh.write(block)
+            known.add(rel.lower())
+            done.append(f"{rel}: {about}")
+    return done
+
+
+async def describe_voices_loop() -> None:
+    """При запуске и раз в 5 минут — расшифровать новые свои голосовые в media.toml."""
+    while whisper_on():
+        try:
+            for line in await asyncio.to_thread(_describe_voices_sync):
+                print(f"[медиа] расшифровал своё голосовое → media.toml: {line[:200]}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[медиа] расшифровка своих голосовых: {exc}", file=sys.stderr)
+        await asyncio.sleep(300)
 
 
 def _a() -> str:
@@ -3133,7 +3239,7 @@ async def send_human(chat_id: int, text: str, fast: bool = False, started: float
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(typing)
         msg = await tg(client.send_message(chat_id, part))
-        remember_bot_msg(chat_id, msg.id)
+        bot_sent(chat_id, msg)
         sent_log.setdefault(chat_id, []).append(time.time())
         print(f"[{chat_id}] → {part[:120]}")
         if i < len(parts) - 1:
@@ -3192,7 +3298,8 @@ async def respond(chat_id: int, user: User) -> None:
     note = " ".join(x for x in (now_context() if asks_now else "", memory_note(history, known), gender_note(last_text), known_facts(history, name),
                                 situation_note(pending, name, history),
                                 gap_note(history) or repeat_note(history) or stall_note(history),
-                                media_status(chat_id) if MEDIA_SEND else "") if x)
+                                media_status(chat_id) if MEDIA_SEND else "",
+                                media_ask_note(chat_id, media_asked(history)) if not hint_text else "") if x)
     if heart_due(history) == "ask":
         note += (" Он просит сердечко: оно уйдёт само отдельным сообщением сразу после твоего ответа, "
                  "так что ответь по-тёплому в пару слов («лови», «держи»), сам эмодзи не ставь, "
@@ -3438,10 +3545,31 @@ async def respond(chat_id: int, user: User) -> None:
             if a[0] == "media" and (asked is None or (it and asked and it["kind"] not in asked)):
                 why = "не просили" if asked is None else f"просили {', '.join(sorted(asked))}"
                 print(f"[{name}] медиа «{a[1]}» не отправляю — {why} (MEDIA_SELF=0)")
-                why_drop = why_drop or "not_asked"
+                why_drop = why_drop or ("wrong_kind" if asked else "not_asked")
                 continue
             keep.append(a)
-        if len(keep) < len(file_actions):
+        if why_drop == "wrong_kind":
+            # модель перепутала вид (видео вместо фото) — переспрашиваем, показав только подходящие файлы
+            fix = (media_ask_note(chat_id, asked) + " В прошлый раз ты поставил тег файла не того вида - "
+                   "так нельзя.")
+            raw2 = await run_harness(build_task(name, history, fix, note), build_messages(name, history, fix, note))
+            if state["paused"] or chat_id in manual_during:
+                return
+            text2, acts2 = extract_file_actions(raw2)
+            m2 = next((a for a in acts2 if a[0] == "media"), None)
+            it2 = find_media(m2[1]) if m2 else None
+            ok = it2 and it2["kind"] in asked and not media_sent_in(chat_id).get(it2["name"])
+            text2 = humanize(strip_fake_media(text2))
+            if ok or (not m2 and text2 and not service_tag(text2) and not _SENDING_RE.search(text2)):
+                print(f"[{name}] переспросил про медиа: «{reply}» → «{text2}»"
+                      + (f" + {it2['name']}" if ok else " (без медиа)"))
+                reply = text2
+                keep = [a for a in keep if a[0] != "media"] + ([m2] if ok else [])
+                file_actions = keep
+                why_drop = ""
+            else:
+                why_drop = "not_asked"
+        if why_drop and len(keep) < len(file_actions):
             # текст наверняка «держи фото» — без файла это враньё: переписываем ответ без медиа
             extra = {
                 "already": "Это ты уже отправлял ему раньше - оно есть выше в переписке. Не отправляй снова "
@@ -3501,7 +3629,7 @@ async def respond(chat_id: int, user: User) -> None:
         if correction:
             await asyncio.sleep(random.uniform(0.5, 1.5))
             msg = await tg(client.send_message(chat_id, correction))
-            remember_bot_msg(chat_id, msg.id)
+            bot_sent(chat_id, msg)
             save_state()  # иначе после перезапуска «*слово» выглядит как написанное тобой вручную
         await notify(f"🤖 → {name}:\n{reply}")
     if hint and owner_hints.get(chat_id) == hint:
@@ -3660,7 +3788,7 @@ async def anon_next(chat_id: int, reason: str, farewell: str | None = None) -> N
             print(f"[anon] farewell error: {exc}", file=sys.stderr)
     await asyncio.sleep(random.uniform(0.8, 2))
     msg = await tg(client.send_message(chat_id, "/next"))
-    remember_bot_msg(chat_id, msg.id)
+    bot_sent(chat_id, msg)
     save_state()
     print(f"[anon] скип ({reason}) → /next")
 
@@ -3676,7 +3804,7 @@ async def auto_search(chat_id: int) -> None:
         if state["paused"] or state.get("anon_active"):
             return
         msg = await tg(client.send_message(chat_id, "/search"))
-        remember_bot_msg(chat_id, msg.id)
+        bot_sent(chat_id, msg)
         save_state()
         print("[anon] ищу следующего (/search)")
     except Exception as exc:  # noqa: BLE001
@@ -4182,7 +4310,16 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
             return (f"📝 {who_name(user)}: «{rest}»\n"
                     + ("бот сейчас думает — переделает ответ с указанием" if busy else "напишу с учётом этого"))
         if cmd == "write":
-            await tg(client.send_message(user.id, rest))
+            msg = await tg(client.send_message(user.id, rest))
+            # событий о своих отправках Telegram этому клиенту не шлёт — делаем то же, что
+            # on_outgoing для сообщения с телефона: показать в ub, отметить «ты влез», в память
+            watch_push(user.id, msg)
+            manual_during.add(user.id)
+            if not (ANON_CHAT_ID is not None and user.id == ANON_CHAT_ID):
+                schedule_contact_sync(user.id)
+            else:
+                anon_touch("out")
+                anon_touch("manual")
             mins = int(CFG["takeover_min"])
             return "✎ отправил от тебя" + (f" — бот уступит чат на {mins} мин" if mins > 0
                                            else " (TAKEOVER_MINUTES=0 — бот не уступает чат)")
@@ -4226,22 +4363,29 @@ def chat_label(user: User | None) -> str | None:
     return who_name(user) if user else None
 
 
-async def on_watch(event):
-    """Новые сообщения чатов, открытых в ub (open), — туда вживую."""
-    conns = [c for c in CONTROL_CONNS if c["chat"] and c["chat"].id == event.chat_id]
-    if not conns:
-        return
-    if event.out:
-        await asyncio.sleep(1.5)  # чтобы remember_bot_msg успел пометить сообщение бота
-    for conn in conns:
+def watch_push(chat_id: int, message) -> None:
+    """Сообщение — во все ub, где открыт этот чат."""
+    for conn in [c for c in CONTROL_CONNS if c["chat"] and c["chat"].id == chat_id]:
         u = conn["chat"]
-        if is_anon_bot(u) and not event.out and is_anon_system(event.message):
+        if is_anon_bot(u) and not message.out and is_anon_system(message):
             _conn_send(conn, {"type": "msg", "kind": "sys",
-                              "text": f"[анонимный чат] {(event.raw_text or '').strip()[:200]}"})
+                              "text": f"[анонимный чат] {(message.raw_text or '').strip()[:200]}"})
             continue
-        line = format_msg(event.message, display_name(u) if not is_anon_bot(u) else "он")
+        line = format_msg(message, display_name(u) if not is_anon_bot(u) else "он")
         kind = "me" if "✎ ты" in line else "bot" if "→ бот" in line else "in"
         _conn_send(conn, {"type": "msg", "kind": kind, "text": line})
+
+
+async def on_watch(event):
+    """Новые сообщения чатов, открытых в ub (open), — туда вживую.
+    Сообщения самого бота сюда обычно не приходят — их показывает bot_sent."""
+    if not any(c["chat"] and c["chat"].id == event.chat_id for c in CONTROL_CONNS):
+        return
+    if event.out:
+        await asyncio.sleep(1.5)  # чтобы bot_sent успел пометить сообщение бота
+        if is_bot_msg(event.chat_id, event.id):
+            return  # уже показано из bot_sent — не дублировать
+    watch_push(event.chat_id, event.message)
 
 
 async def control_exec(conn: dict, line: str) -> str:
@@ -4440,6 +4584,8 @@ async def main() -> None:
     elif not CFG["allow"] and not CFG["allow_non_contacts"]:
         print("[userbot] внимание: белый список пуст — отвечать некому")
     spawn(preload_whisper())
+    if "voice" in MEDIA_SEND:
+        spawn(describe_voices_loop())
     spawn(watchdog())
     if CFG["anon_bot"]:
         spawn(anon_idle_watch())

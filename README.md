@@ -614,8 +614,8 @@ The `media/` folder is in `.gitignore` — your files won't get into the reposit
 
 ### Descriptions: `media/media.toml`
 
-The bot **doesn't look at or listen to the files itself** — it knows only what's written
-in `media/media.toml`. Based on these descriptions the model decides what fits the conversation.
+The bot **doesn't look at the files itself** — it knows only what's written
+in `media/media.toml` (your own voice messages get transcribed into it automatically, see below). Based on these descriptions the model decides what fits the conversation.
 The full commented template is `media.example.toml`.
 
 ```toml
@@ -650,6 +650,18 @@ when  = "never"                          # don't send
 
 A file without an entry in `media.toml` works too: description = file name, `when` = `now`
 (or `later` if it's in a `later/` subfolder).
+
+**Your voice messages are transcribed automatically.** If voice is enabled (`voice` in `MEDIA_SEND`) and
+whisper works (`WHISPER_MODEL`), on start and then every 5 minutes the bot finds files in `media/voice/`
+without an entry in `media.toml`, transcribes them and appends an entry to the end of the file:
+```toml
+[[media]]
+file  = "voice/bus.ogg"
+about = "говорю: «привет, я щас в автобусе, не могу писать»"   # расшифровано автоматически — проверь
+```
+(`говорю` = "I say"; the comment means "auto-transcribed — check it".) Check the text and fix it or add `when`
+if you like. Entries you wrote yourself are never touched; to re-transcribe a file, delete its entry.
+Describe photos, videos and video messages yourself.
 
 ### How it looks
 
