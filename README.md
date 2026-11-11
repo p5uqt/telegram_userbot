@@ -234,6 +234,8 @@ Everything else goes into `persona.md` (see below).
 | `TG_TIMEOUT_SECONDS` | `60` | timeout for Telegram requests |
 | `WORKER_MAX_SECONDS` | `900` | a reply "hanging" longer than this is dropped and regenerated once |
 | `MEMORY_SUMMARY_EVERY` | `10` | after how many new messages to update the note about a person |
+| `MEMORY_BOOTSTRAP_MESSAGES` | `400` | how many latest messages to read when a chat is first seen; `0` — the whole conversation |
+| `MEMORY_LOG_LINES` | `300` | how many latest lines of the conversation to keep in `state/contacts/<id>.md`; older ones go to the archive. `0` — never archive |
 | `SYNC_ALL_CONTACTS` | `1` | after start, go through all recent chats (up to 200) and add what happened while the bot was off to memory; `0` — don't scan, a chat's memory updates when a new message arrives in it |
 | `SYNC_CONTACTS` | empty | who to scan on start anyway, even with `SYNC_ALL_CONTACTS=0`: `@nick`, id, `+phone`, comma-separated. Manually — the `sync <who>` command |
 
@@ -461,7 +463,7 @@ ub[Masha (@masha)]> exit      # stop the bot
 | `tell [who] <text>` | instruction for the bot: a topic, a question, "send a photo of the cat" |
 | `forget [who]` | cancel the instruction |
 | `note [who] [text]` | memory about a person: remember / correct / forget a fact or a standing directive; nothing is sent to them. Without text — show the memory |
-| `sync [who]` | add the conversation with a person to memory right now (what happened without the bot); nothing is sent to them |
+| `sync [who] [full]` | add the conversation with a person to memory right now (what happened without the bot); `full` — re-read the whole conversation from the start and rebuild the note; nothing is sent to them |
 | `write [who] <text>` | send a message yourself (the bot yields the chat for `TAKEOVER_MINUTES`) |
 | `send [who] <file>` | send media from `media/` right away, without the model |
 | `media` | list of media with descriptions |
@@ -579,6 +581,18 @@ For every private chat the bot keeps a file `state/contacts/<id>.md`: a short "w
 the prompt, so the bot doesn't ask about what it already knows. You can edit or delete the file by hand — then
 the memory about that person starts over. No memory is kept in the anonymous chat.
 
+The model writes the note in order: everything not yet summarised is processed in batches of 200 messages,
+oldest first, and the note is saved after each batch. So a long conversation is read in full, not just its tail.
+When a chat is first seen, the latest `MEMORY_BOOTSTRAP_MESSAGES` messages are read (`0` — the whole conversation).
+To re-read an already known chat from the very beginning and rebuild the note — `sync <who> full` (runs in the
+background; what you said about the person yourself via `note` is kept).
+
+So the file doesn't grow forever (it is read and rewritten on every reply), it keeps the latest
+`MEMORY_LOG_LINES` lines of the conversation, and older ones are moved to `state/contacts/archive/<id>.md`.
+Only messages already covered by the note are archived — anything the model hasn't summarised yet stays in the file,
+so nothing is lost from the memory about the person. Lines move in batches (once the log is ~20% over the limit);
+the bot never reads the archive itself — it is for you; `info` shows how many messages are archived.
+
 ---
 
 ## Your own photos, videos, voice and video messages
@@ -594,6 +608,7 @@ Off by default.
 | `MEDIA_SELF` | `0` | `0` — only when the other person asks; `1` — may also send on its own when it fits |
 | `MEDIA_DIR` | `media/` next to the bot | media folder |
 | `MEDIA_LATER_MIN` / `MEDIA_LATER_MAX` | `10` / `60` | for "stall": after how many minutes to send, random within the range |
+| `MEDIA_MAX_PHOTO` / `_VIDEO` / `_VOICE` / `_ROUND` | `60` | how many files of each kind the model is shown (a separate limit per kind). The list goes into every prompt: the longer it is, the slower the reply and the more mix-ups. `0` — no limit; the extra ones are the last alphabetically, and the bot says so in the log |
 
 ```
 MEDIA_SEND=all            # everything
