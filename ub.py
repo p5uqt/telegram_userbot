@@ -62,7 +62,7 @@ LOCAL_HELP = (
     "  clear                        очистить экран\n"
     + ("  exit                         остановить бота и выйти (Ctrl+D — то же)\n" if MAIN else
        "  exit                         выйти из ub, бот продолжит работать (Ctrl+D — то же)\n")
-    + "↑/↓ — история команд, Tab — дополнение, Ctrl+C — стереть строку, "
+    + "\n↑/↓ — история команд, Tab — дополнение, Ctrl+C — стереть строку, "
       "а в открытом чате с пустой строкой — закрыть чат (как close)")
 
 state = {"chat": None, "chat_id": None, "reading": False, "commands": ["help"], "sock": None,
@@ -243,6 +243,72 @@ def colorize(text: str) -> str:
     for ln in text.split("\n"):
         k = "me" if "] ✎ ты:" in ln else "bot" if "] → бот:" in ln else "in" if "] ← " in ln else ""
         out.append(C[k] + ln + C["off"] if k else ln)
+    return "\n".join(out)
+
+
+_HELP_ROW = re.compile(r"^  (\S.*?)\s{2,}(\S.*)$")     # «  команда [арг]    описание»
+_HELP_CONT = re.compile(r"^\s{20,}(\S.*)$")            # продолжение описания с новой строки
+
+
+def pretty_help(text: str, title: bool = False) -> str:
+    """Справка таблицей по ширине окна: длинное описание переносится под свою колонку, а не
+    в начало строки; команда подсвечена, аргументы приглушены. title — первая строка это
+    сама команда (help <команда>)."""
+    import shutil  # noqa: PLC0415
+    import textwrap  # noqa: PLC0415
+    width = max(50, shutil.get_terminal_size((100, 24)).columns - 1)   # вся ширина окна
+
+    def wrap(txt: str, w: int, **kw) -> list[str]:
+        """Перенос по ширине; если на последней строке осталось одно слово — сужаем чуть-чуть,
+        чтобы к нему переехало ещё одно-два (одинокое «всех» под длинной строкой режет глаз)."""
+        base = textwrap.wrap(txt, w, break_on_hyphens=False, **kw) or [""]
+        if len(base) > 1 and len(base[-1].split()) == 1:
+            for narrower in range(w - 1, max(20, w - 25), -1):
+                alt = textwrap.wrap(txt, narrower, break_on_hyphens=False, **kw)
+                if len(alt) != len(base):
+                    break
+                if len(alt[-1].split()) > 1:
+                    return alt
+        return base
+    bold, dim, key, off = ("\033[1m", "\033[2m", "\033[36m", C["off"]) if TTY else ("", "", "", "")
+    items: list[list[str]] = []
+    for ln in text.split("\n"):
+        if m := _HELP_ROW.match(ln):
+            items.append(["row", m.group(1), m.group(2)])
+        elif (m := _HELP_CONT.match(ln)) and items and items[-1][0] == "row":
+            items[-1][2] += " " + m.group(1)
+        elif not ln.strip():
+            items.append(["blank"])
+        elif not ln.startswith(" ") and ln.rstrip().endswith(":") and len(ln) < 45:
+            items.append(["head", ln])
+        else:
+            items.append(["text", ln])
+    col = min(26, max((len(i[1]) for i in items if i[0] == "row"), default=0)) + 5   # где начинается описание
+    out: list[str] = []
+    for n, it in enumerate(items):
+        if it[0] == "row":
+            name, _, args = it[1].partition(" ")
+            head = f"  {key}{name}{off}" + (f" {dim}{args}{off}" if args else "")
+            desc = wrap(it[2], max(20, width - col))
+            if len(it[1]) + 2 > col - 2:      # команда длиннее колонки — описание со следующей строки
+                out.append(head)
+                out += [" " * col + d for d in desc]
+            else:
+                out.append(head + " " * (col - 2 - len(it[1])) + desc[0])
+                out += [" " * col + d for d in desc[1:]]
+        elif it[0] == "head":
+            out.append(bold + it[1] + off)
+        elif it[0] == "text":
+            ind = it[1][:len(it[1]) - len(it[1].lstrip())]
+            wrapped = wrap(it[1].strip(), max(20, width), initial_indent=ind, subsequent_indent=ind)
+            if it[1].startswith(("↑/↓", "Подробнее:")):
+                wrapped = [dim + w + off for w in wrapped]
+            if title and n == 0:
+                name, _, args = it[1].partition(" ")
+                wrapped = [f"{bold}{key}{name}{off}" + (f" {dim}{args}{off}" if args else "")]
+            out += wrapped
+        else:
+            out.append("")
     return "\n".join(out)
 
 
@@ -492,13 +558,13 @@ def main() -> None:
             log_mode(nums[0] if nums else 40, every=every)
             continue
         if state["sock"] is None and cmd in ("help", "h", "?"):
-            print("общий режим (ub>) — здесь работают:" + LOCAL_HELP.split("В ub:", 1)[1]
-                  + "\n\nКоманды бота (status, chats, open, tell, restart…) — внутри аккаунта: use <имя>, "
-                    "там help покажет их все. Или сразу всем: all <команда>.")
+            print(pretty_help("Общий режим (ub>) — здесь работают:" + LOCAL_HELP.split("В ub:", 1)[1]
+                              + "\n\nКоманды бота (status, chats, open, tell, restart…) — внутри аккаунта: "
+                                "use <имя>, там help покажет их все. Или сразу всем: all <команда>."))
             continue
         text = request(line)
-        if cmd in ("help", "h", "?") and len(parts) == 1:
-            text += LOCAL_HELP
+        if cmd in ("help", "h", "?"):
+            text = pretty_help(text + (LOCAL_HELP if len(parts) == 1 else ""), title=len(parts) > 1)
         with print_lock:
             print(colorize(text))
     state["quit"] = True
