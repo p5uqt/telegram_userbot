@@ -255,9 +255,19 @@ if str(P.get("gender", "")).strip():
 
 
 def is_english(history: list[str]) -> bool:
-    """Последнее сообщение собеседника — по-английски."""
-    last = next((t[1] for t in map(_history_turn, reversed(history)) if t and t[0] == "user"), "")
-    return bool(not re.search(r"[а-яёА-ЯЁіїєґ]", last) and re.search(r"[a-zA-Z]{2}", last))
+    """Собеседник пишет по-английски: в последнем его сообщении латиницы больше, чем кириллицы.
+    Одно русское слово («i know привет lol») язык не переключает; короткое («ok», «))», «лол»)
+    само не решает — добавляем предыдущие его сообщения (до 3), пока не наберётся 6 букв."""
+    lat = cyr = checked = 0
+    for t in map(_history_turn, reversed(history)):
+        if not t or t[0] != "user":
+            continue
+        lat += len(re.findall(r"[a-zA-Z]", t[1]))
+        cyr += len(re.findall(r"[а-яёА-ЯЁіїєґІЇЄҐ]", t[1]))
+        checked += 1
+        if lat + cyr >= 6 or checked >= 3:
+            break
+    return lat > cyr and lat >= 2
 
 
 def pick_lang(ru: list[str], en: list[str] | None, history: list[str]) -> list[str]:
@@ -974,6 +984,9 @@ def build_messages(name: str, history: list[str], extra: str = "", note: str = "
         # ответами, и llama.cpp берёт их из кэша вместо пересчёта всего промпта.
         # подсказку в конце system слабая модель часто игнорирует — дублируем рядом с репликой
         hints = [time_hint()]
+        if is_english(history):
+            # персона и инструкции русские — без явной подсказки модель иногда съезжает на русский
+            hints.append("он пишет по-английски - отвечай ТОЛЬКО по-английски, ни слова по-русски")
         last = msgs[-1]["content"]
         rm = REPLY_RE.search(last) if isinstance(last, str) else None
         if rm:
