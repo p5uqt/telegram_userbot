@@ -4177,6 +4177,34 @@ def schedule_contact_sync(chat_id: int, delay: float = 5) -> None:
     _sync_tasks[chat_id] = asyncio.create_task(run())
 
 
+async def memory_people() -> list[User]:
+    """Все, с кем бот ведёт память: у кого уже есть файл в contacts/ и люди из белого списка
+    среди последних 200 чатов. Чужие чаты (не из белого списка и без файла) сюда не попадают."""
+    out = []
+    for d in await tg_iter(client.iter_dialogs(limit=200), CFG["tg_timeout"] * 3):
+        if not d.is_user or not d.message or getattr(d.entity, "bot", False) or (me and d.id == me.id):
+            continue
+        if contact_path(d.id).exists() or allowed(d.entity):
+            out.append(d.entity)
+    return out
+
+
+async def sync_everyone(people: list[User], full: bool = False) -> None:
+    """sync all [full]: по очереди, чтобы не завалить Telegram запросами; сводки встают в очередь к модели."""
+    done = added = 0
+    for user in people:
+        try:
+            n = await sync_one(user, full)
+            done, added = done + 1, added + n
+            if n:
+                print(f"[memory] sync all: {display_name(user)} — {n} сообщ. ({done}/{len(people)})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[memory] sync all: {display_name(user)}: {exc}", file=sys.stderr)
+        await asyncio.sleep(1)
+    print(f"[memory] sync all{' full' if full else ''}: прошёл {done} из {len(people)} чатов, {added} сообщ. — "
+          "заметки обновляются в фоне")
+
+
 async def sync_one(user: User, full: bool = False) -> int:
     """Дописать в память переписку с одним человеком; сколько сообщений добавилось.
     full — перечитать всю переписку с начала и построить заметку заново."""
@@ -4231,8 +4259,9 @@ COMMANDS = [
     ("forget", "[кто]", "отменить указание", False),
     ("info", "[кто]", "сведения о человеке из памяти (шапка state/contacts/<id>.md); без <кто> — список всех", False),
     ("note", "[кто] [текст]", "память о человеке: запомнить/исправить/забыть факт или установку; ему ничего не пишет", False),
-    ("sync", "[кто] [full]", "дописать в память переписку с человеком сейчас (то, что было без бота); full — перечитать "
-                             "всю переписку с начала и построить заметку заново; ему ничего не пишет", False),
+    ("sync", "[кто|all] [full]", "дописать в память переписку с человеком сейчас (то, что было без бота); all — со всеми, "
+                                 "о ком есть память, и людьми из белого списка; full — перечитать всю переписку с начала "
+                                 "и построить заметку заново; никому ничего не пишет", False),
     ("write", "[кто] <текст>", "написать сообщение от себя (бот уступит тебе на TAKEOVER_MINUTES)", False),
     ("send", "[кто] <файл>", "сразу отправить медиа из media/ без модели", False),
     ("media", "", "список медиа с описаниями", False),
@@ -4526,8 +4555,18 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         save_state()
         return f"🔇 {who_name(user)} — больше не отвечаю" if cmd == "mute" else f"🔈 {who_name(user)} — снова отвечаю"
     if cmd == "sync":
-        full = any(a.lower() in ("full", "всё", "все", "вся") for a in args)
-        args = [a for a in args if a.lower() not in ("full", "всё", "все", "вся")]
+        full = any(a.lower() in ("full", "полностью") for a in args)
+        args = [a for a in args if a.lower() not in ("full", "полностью")]
+        if args and args[0].lower() in ("all", "все", "всех"):
+            if CFG["anon_bot"]:
+                return "в анонимном чате памяти нет — там каждый раз новый человек"
+            people = await memory_people()
+            if not people:
+                return "🧠 некого синхронизировать: нет ни памяти о ком-то, ни людей из белого списка в недавних чатах"
+            spawn(sync_everyone(people, full))
+            return (f"🧠 {'перечитываю всю переписку и строю заметки заново' if full else 'дописываю новое в память'}: "
+                    f"{len(people)} чел. — это в фоне, ход виден в логе ([memory])"
+                    + ("; то, что ты сам говорил о людях (note), остаётся" if full else ""))
         user, _, err = await _target(args, current, False)
         if err:
             return err

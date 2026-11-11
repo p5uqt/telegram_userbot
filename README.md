@@ -463,7 +463,7 @@ ub[Masha (@masha)]> exit      # stop the bot
 | `tell [who] <text>` | instruction for the bot: a topic, a question, "send a photo of the cat" |
 | `forget [who]` | cancel the instruction |
 | `note [who] [text]` | memory about a person: remember / correct / forget a fact or a standing directive; nothing is sent to them. Without text — show the memory |
-| `sync [who] [full]` | add the conversation with a person to memory right now (what happened without the bot); `full` — re-read the whole conversation from the start and rebuild the note; nothing is sent to them |
+| `sync [who\|all] [full]` | add the conversation with a person to memory right now (what happened without the bot); `all` — with everyone the bot has memory about plus whitelisted people; `full` — re-read the whole conversation from the start and rebuild the note; nothing is sent to anyone |
 | `write [who] <text>` | send a message yourself (the bot yields the chat for `TAKEOVER_MINUTES`) |
 | `send [who] <file>` | send media from `media/` right away, without the model |
 | `media` | list of media with descriptions |
@@ -585,7 +585,9 @@ The model writes the note in order: everything not yet summarised is processed i
 oldest first, and the note is saved after each batch. So a long conversation is read in full, not just its tail.
 When a chat is first seen, the latest `MEMORY_BOOTSTRAP_MESSAGES` messages are read (`0` — the whole conversation).
 To re-read an already known chat from the very beginning and rebuild the note — `sync <who> full` (runs in the
-background; what you said about the person yourself via `note` is kept).
+background; what you said about the person yourself via `note` is kept). For everyone at once —
+`sync all` (append what is new) or `sync all full` (re-read everything): that is everyone the bot already has memory
+about plus whitelisted people among the latest 200 chats; in the general `ub>` mode the command goes to all accounts.
 
 So the file doesn't grow forever (it is read and rewritten on every reply), it keeps the latest
 `MEMORY_LOG_LINES` lines of the conversation, and older ones are moved to `state/contacts/archive/<id>.md`.

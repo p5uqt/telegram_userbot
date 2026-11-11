@@ -477,6 +477,10 @@ def main() -> None:
             # restart all = all restart (и pause/resume/status…): у этих команд нет текста, «all» не спутать
             parts = ["all", cmd] + [x for x in parts[1:] if x.lower() != "all"]
             cmd = "all"
+        if cmd == "sync" and state["account"] is None and any(x.lower() in ("all", "все", "всех") for x in parts[1:]):
+            # общий режим: sync all [full] — память всех людей во всех аккаунтах
+            parts = ["all"] + parts
+            cmd = "all"
         if cmd == "all" and len(parts) > 1 and parts[1].lower() == "logs":
             cmd, parts = "logs", ["logs", "all"] + parts[2:]   # all logs = logs all
         if cmd == "all":
