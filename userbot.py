@@ -1579,6 +1579,27 @@ def keep_file_tags(text: str) -> tuple[str, str]:
     return MEDIA_TAG_RE.sub("", rest), "\n".join(tags)
 
 
+def media_row(media: list[tuple]) -> list[tuple]:
+    """Какие медиа-теги из ответа выполнять. Обычно один; голосовые/кружки — до MEDIA_ROW подряд
+    («привет» и следом «как дела»), в том порядке, в каком модель их поставила."""
+    if MEDIA_ROW <= 1 or len(media) <= 1:
+        return media[:1]
+
+    def spoken(a: tuple) -> dict | None:
+        it = find_media(a[1], set(MEDIA_KINDS))
+        return it if it and it["kind"] in ("voice", "round") else None
+
+    if not spoken(media[0]):
+        return media[:1]   # фото/видео — по-прежнему по одному
+    row, seen = [], set()
+    for a in media:
+        it = spoken(a)
+        if it and it["name"] not in seen:
+            seen.add(it["name"])
+            row.append(a)
+    return row[:MEDIA_ROW]
+
+
 def extract_file_actions(raw: str) -> tuple[str, list[tuple]]:
     acts: list[tuple] = []
     for m in FILE_CREATE_RE.finditer(raw or ""):
@@ -1595,21 +1616,23 @@ def extract_file_actions(raw: str) -> tuple[str, list[tuple]]:
             acts.append(("send", m.group(1)))
     rest = FILE_SEND_RE.sub("", rest)
     media += [("media", m.group(1)) for m in MEDIA_TAG_RE.finditer(rest)]
-    acts += media[:1]  # медиа — по одному за ответ
     rest = MEDIA_TAG_RE.sub("", rest)
     if not FILES_SEND:  # отправка файлов выключена — теги вырезаем, но ничего не делаем
-        acts = [a for a in acts if a[0] == "media"]
-    return re.sub(r"\n{3,}", "\n\n", rest).strip(), acts[:3]
+        acts = []
+    return re.sub(r"\n{3,}", "\n\n", rest).strip(), acts[:3 - bool(media)] + media_row(media)
 
 
 async def do_file_actions(chat_id: int, acts: list[tuple], name: str, anon: bool = False,
                           now: bool = False, caption: str | None = None) -> int:
     """Сколько файлов/медиа реально ушло (или встало в очередь)."""
     ok = 0
-    for act in acts:
+    # несколько голосовых подряд: текст пишем один раз, после последнего, что уходит сразу
+    cap_at = max((i for i, a in enumerate(acts) if a[0] == "media" and (
+        now or ((it := find_media(a[1])) and it["when"] == "now"))), default=-1)
+    for i, act in enumerate(acts):
         if act[0] == "media":
             try:
-                ok += await do_media_action(chat_id, act[1], name, anon, now, caption)
+                ok += await do_media_action(chat_id, act[1], name, anon, now, caption if i == cap_at else None)
             except Exception as exc:  # noqa: BLE001
                 it = find_media(act[1])
                 if it:
@@ -1657,6 +1680,8 @@ _MEDIA_EXT = {
 }
 # 0 = только когда собеседник сам просит (по умолчанию); 1 = может и сам, когда к месту
 MEDIA_SELF = env_str("MEDIA_SELF", default="0") == "1"
+# сколько голосовых/кружков подряд можно отправить за один ответ (1 — по одному, как раньше)
+MEDIA_ROW = max(1, int(env_float("MEDIA_ROW", 1)))
 # Сколько файлов каждого вида показывать модели (список идёт в каждый промпт: чем он длиннее,
 # тем медленнее ответ и тем чаще слабая модель путает файлы). 0 = без лимита.
 MEDIA_MAX = {k: max(0, int(env_float(f"MEDIA_MAX_{k.upper()}", 60))) for k in ("photo", "video", "voice", "round")}
@@ -1925,6 +1950,10 @@ def media_note(kinds: set[str] | None = None) -> str:
         f"У тебя есть свои готовые {kinds} (это исключение из правила «не давай фото»: эти - можно):\n"
         + "\n".join(lines) + "\n"
         "Отправить - в конце ответа отдельной строкой: [медиа: имя]. Только из списка, по одному за раз.\n"
+        + (f"Исключение - голосовые и кружочки: их можно несколько подряд (не больше {MEDIA_ROW}), если "
+           "вместе они звучат как живая речь (одно «привет», следом другое «как дела»). Каждый тег - на "
+           "своей строке, в том порядке, в каком отправлять. Не лепи подряд несвязанные и не повторяй одно "
+           "и то же.\n" if MEDIA_ROW > 1 else "") +
         + ("«можно сразу» - отправляй, когда просят или это к месту по разговору.\n" if MEDIA_SELF else
            "Отправляй ТОЛЬКО если собеседник сам просит прислать фото/видео/голосовое/кружок или "
            "показать что-то. Сам, без просьбы, никогда не предлагай и не отправляй.\n") +
@@ -3791,6 +3820,8 @@ async def respond(chat_id: int, user: User) -> None:
                 why_drop = why_drop or ("wrong_kind" if asked else "not_asked")
                 continue
             keep.append(a)
+        if why_drop and any(a[0] == "media" for a in keep):
+            why_drop = ""  # из серии голосовых часть отсеяна, остальные уходят — ответ не переписываем
         if why_drop == "wrong_kind":
             # модель перепутала вид (видео вместо фото) — переспрашиваем, показав только подходящие файлы
             fix = (media_ask_note(chat_id, asked, history) + " В прошлый раз ты поставил тег файла не того вида - "
@@ -3863,8 +3894,9 @@ async def respond(chat_id: int, user: User) -> None:
         cap = _SENDING_RE.sub("", strip_html(reply).replace("\n", " "))
         cap = re.sub(r"^\W*(?:ну\s+)?(?:ладно|ок|окей|хорошо|ага|щас|сейчас|вот|на)\b[\s,.!)]*", "", cap, flags=re.I)
         cap = re.sub(r"\s{2,}", " ", cap).strip(" ,.!-")
-        if cap and (it := find_media(media_now[0][1], set(MEDIA_KINDS))):
-            cap = drop_spoken(cap, it).strip(" ,.!-")  # не дублировать текстом сказанное в голосовом
+        for a in media_now:  # не дублировать текстом сказанное в голосовом
+            if cap and (it := find_media(a[1], set(MEDIA_KINDS))):
+                cap = drop_spoken(cap, it).strip(" ,.!-")
         caption = cap if len(cap) >= 3 else None
         print(f"[{name}] текст «{reply}» → {'подпись «' + caption + '»' if caption else 'без подписи'}")
         reply = ""

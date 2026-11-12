@@ -608,6 +608,7 @@ Off by default.
 |---|---|---|
 | `MEDIA_SEND` | empty (off) | what may be sent, comma-separated: `photo`, `video`, `voice`, `round` or `all` |
 | `MEDIA_SELF` | `0` | `0` — only when the other person asks; `1` — may also send on its own when it fits |
+| `MEDIA_ROW` | `1` | how many voice messages / video notes in a row the bot may send in one reply ("hi", then "how are you"). `1` — one at a time. Photos and videos are always one at a time |
 | `MEDIA_DIR` | `media/` next to the bot | media folder |
 | `MEDIA_LATER_MIN` / `MEDIA_LATER_MAX` | `10` / `60` | for "stall": after how many minutes to send, random within the range |
 | `MEDIA_MAX_PHOTO` / `_VIDEO` / `_VOICE` / `_ROUND` | `60` | how many files of each kind the model is shown (a separate limit per kind). The list goes into every prompt: the longer it is, the slower the reply and the more mix-ups. `0` — no limit; the extra ones are the last alphabetically, and the bot says so in the log |
