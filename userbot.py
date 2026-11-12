@@ -3461,31 +3461,53 @@ def heart_due(history: list[str]) -> str:
     return ""
 
 
+# игривый / мягкий ответ: без «)» он звучит сухо или как сарказм
+_PLAYFUL_REPLY_RE = re.compile(
+    r"\b(?:ахах\w*|хах\w*|хех\w*|хих\w*|лол|ммм+|шучу|шутка|ну и\b|вот и\b|подожди|погоди|"
+    r"мил\w*|красив\w*|красот\w*|нрав\w*|обожа\w*|скуча\w*|целую|обнима\w*|горяч\w*|хоч\w*|"
+    r"дразн\w*|интересн\w*|загадк\w*|секрет\w*|угадай|сам\w* такой|хитр\w*|наглый|наглая|"
+    r"рада?\b|приятно|мур\w*)", re.I)
+
+
+def _their_last(history: list[str]) -> list[str]:
+    """Его последняя пачка сообщений (после нашего последнего ответа)."""
+    out = []
+    for t in filter(None, map(_history_turn, reversed(history))):
+        if t[0] != "user":
+            break
+        out.append(t[1])
+    return out
+
+
 def _warm_moment(reply: str, history: list[str]) -> bool:
     if _WARM_REPLY_RE.search(reply):
         return True
-    for t in filter(None, map(_history_turn, reversed(history))):
-        if t[0] != "user":
-            break  # смотрим только его последнюю пачку сообщений
-        if _WARM_THEIRS_RE.search(t[1]):
-            return True
-    return False
+    return any(_WARM_THEIRS_RE.search(x) for x in _their_last(history))
 
 
-SMILEY_GAP = int(env_float("SMILEY_GAP", 4))  # после «)» столько своих сообщений подряд без скобки
+def _smiley_wanted(reply: str, history: list[str]) -> bool:
+    """Скобка тут к месту: он сам улыбается «)» или ответ игривый/мягкий."""
+    if any(_smiley_parens(x) for x in _their_last(history)):
+        return True  # отзеркаливаем: он со скобкой — и мы можем
+    return bool(_PLAYFUL_REPLY_RE.search(reply))
+
+
+SMILEY_GAP = int(env_float("SMILEY_GAP", 2))  # после «)» столько своих сообщений подряд без скобки
 
 
 def ration_smileys(reply: str, history: list[str]) -> str:
-    """«)» в каждом сообщении выдаёт бота: оставляем одну скобку на ответ и только если
-    в последних SMILEY_GAP своих сообщениях её не было. Остальные убираем."""
+    """«)» в каждом сообщении выдаёт бота: оставляем одну скобку на ответ. Без условий — только
+    если в последних SMILEY_GAP своих сообщениях её не было; в тёплый момент — всегда; когда он сам
+    улыбается или ответ игривый — тоже, но не больше трёх своих скобок подряд."""
     pos = _smiley_parens(reply)
     if not pos:
         return reply
     mine = [t[1] for t in map(_history_turn, history) if t and t[0] == "assistant"]
     recent = mine[-SMILEY_GAP:] if SMILEY_GAP > 0 else []
     keep = None if any(_smiley_parens(x) for x in recent) else pos[0]
-    if keep is None and _warm_moment(reply, history):
-        keep = pos[0]  # прощание, приветствие, «спасибо», сердечко от него — тут скобка к месту
+    streak = len(mine) >= 2 and all(_smiley_parens(x) for x in mine[-2:])
+    if keep is None and (_warm_moment(reply, history) or (not streak and _smiley_wanted(reply, history))):
+        keep = pos[0]  # прощание, «спасибо», он со скобкой, игривый ответ — тут скобка к месту
     out, last = [], 0
     for i in pos:
         if i == keep:
