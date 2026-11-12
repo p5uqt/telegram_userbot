@@ -1935,7 +1935,9 @@ def media_note(kinds: set[str] | None = None) -> str:
         "описанию оно подходит к разговору, иначе отмажься текстом. "
         "Не пиши «ладно, вот моё фото», «держи» - просто тег; если хочешь что-то сказать к фото - "
         "коротко и по-живому («это мой кот, спит как обычно»), это уйдёт подписью к фото. "
-        "Не описывай своё фото/видео подробно и не пиши пометки вроде [фото] - только тег.\n\n"
+        "Не описывай своё фото/видео подробно и не пиши пометки вроде [фото] - только тег. "
+        "К голосовому/кружку не пиши текстом то, что в нём уже сказано: слова из «…» собеседник "
+        "услышит сам - ставь только тег.\n\n"
     )
 
 
@@ -2054,6 +2056,30 @@ async def send_media(chat_id: int, it: dict, caption: str | None = None) -> int 
                 attributes=[DocumentAttributeVideo(duration=int(round(dur)), w=384, h=384, round_message=True)]),
                 CFG["tg_timeout"] * 3)
     return msg.id
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text.lower().replace("ё", "е")))
+
+
+def drop_spoken(caption: str, it: dict) -> str:
+    """Убрать из текста к голосовому/кружку то, что в нём уже сказано вслух: человек не
+    пишет следом то же самое, что только что произнёс."""
+    if it["kind"] not in ("voice", "round"):
+        return caption
+    said = _words(" ".join(x or y for x, y in _QUOTED_RE.findall(str(it.get("about") or ""))))
+    if not said:
+        return caption
+
+    def repeats(text: str) -> bool:
+        w = _words(text)
+        same = w & said
+        return bool(same) and len(same) >= 0.6 * len(said) and len(same) >= 0.5 * len(w)
+
+    # по фразам: повтор убираем, а то, что добавлено от себя («только честно»), оставляем
+    parts = [x for x in re.split(r"(?<=[.!?…])\s+", caption) if x.strip()]
+    left = " ".join(x for x in parts if not repeats(x)).strip()
+    return "" if repeats(left) else left
 
 
 def _media_label(it: dict) -> str:
@@ -3837,6 +3863,8 @@ async def respond(chat_id: int, user: User) -> None:
         cap = _SENDING_RE.sub("", strip_html(reply).replace("\n", " "))
         cap = re.sub(r"^\W*(?:ну\s+)?(?:ладно|ок|окей|хорошо|ага|щас|сейчас|вот|на)\b[\s,.!)]*", "", cap, flags=re.I)
         cap = re.sub(r"\s{2,}", " ", cap).strip(" ,.!-")
+        if cap and (it := find_media(media_now[0][1], set(MEDIA_KINDS))):
+            cap = drop_spoken(cap, it).strip(" ,.!-")  # не дублировать текстом сказанное в голосовом
         caption = cap if len(cap) >= 3 else None
         print(f"[{name}] текст «{reply}» → {'подпись «' + caption + '»' if caption else 'без подписи'}")
         reply = ""
