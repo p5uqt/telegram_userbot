@@ -215,13 +215,11 @@ Everything else goes into `persona.md` (see below).
 | `TAKEOVER_MINUTES` | `30` | you wrote yourself in the last N minutes — the bot stays quiet |
 | `MAX_REPLIES_PER_HOUR` | `20` | reply limit per hour per chat |
 | `HISTORY_MESSAGES` | `40` | how many history messages the model sees |
-| `DISCLOSURE_TEXT` | empty | first message in every new private chat (a notice that an AI is replying); empty — no notice, but a direct "are you a bot?" gets an honest answer |
 | `NOTIFY` | `1` | copy replies and errors to Saved Messages |
 | `ANON_MAX_REPLIES_PER_HOUR` | `60` | limit in the anonymous chat |
 | `ANON_HISTORY_MESSAGES` | `24` | history in the anonymous chat |
 | `ANON_TAKEOVER_MINUTES` | `2` | pause if you wrote in the anonymous chat yourself |
 | `ANON_IDLE_MINUTES` | `6` | the anonymous partner is silent for N minutes after our message — `/next` (`0` — off; private chats are not affected) |
-| `ANON_DISCLOSURE_TEXT` | empty | if set — sent to every new anonymous partner |
 | `CALLS` | `ignore` | incoming calls: `ignore` — leave alone, `decline` — decline, `decline_text` — decline and write that you can't talk |
 | `CALL_DECLINE_MIN` / `CALL_DECLINE_MAX` | `4` / `12` | after how many seconds to decline a call |
 | `TYPO_CHANCE` | `0.06` | share of replies with a "phone-style" typo (`0` — no typos) |
@@ -734,11 +732,11 @@ The conversation rules are the `rules` key in `personality.toml` — adjust them
 ## Safety and responsibility
 
 - **This is a userbot** — automation of a regular account. Telegram may restrict or ban an account for automated messages, especially to strangers. Use at your own risk; better start with a separate account.
-- **Who is replying.** The bot doesn't bring up AI on its own, but a direct "are you a bot?" gets an honest answer: an AI assistant is replying for you right now. If you want to warn people up front, set `DISCLOSURE_TEXT` (private chats) and/or `ANON_DISCLOSURE_TEXT`.
+- **Who is replying.** The bot never admits it's an AI: if asked "are you a bot?" it insists it's a real person and sticks to that.
 - **Minors.** In anonymous mode the model no longer ends the dialog by itself based on the other person's age: there is no age filter.
 - **Prompt injection.** The other person's text goes into the prompt. The model only gets text and can't run anything; the `dsh` engine runs `read-only`. Don't give the model tools.
 - **Privacy.** With a cloud model the whole conversation goes to the provider. With a local one it goes nowhere.
-- The bot doesn't arrange meetings or money, doesn't give out contacts and doesn't promise anything on your behalf — but these are rules for the model, not a guarantee. Read the notifications in Saved Messages.
+- The bot doesn't arrange meetings, doesn't give out contacts and doesn't promise anything on your behalf — but these are rules for the model, not a guarantee. Read the notifications in Saved Messages.
 
 ---
 

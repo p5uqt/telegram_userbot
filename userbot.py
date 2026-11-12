@@ -163,8 +163,6 @@ CFG = {
     "gap_hours": env_float("CONVERSATION_GAP_HOURS", 2),
     "anon_history": int(env_float("ANON_HISTORY_MESSAGES", 24)),
     "notify": os.environ.get("NOTIFY", "1") == "1",
-    # пусто = не признаваться, что отвечает ИИ (по умолчанию)
-    "disclosure": os.environ.get("DISCLOSURE_TEXT", "").strip(),
     "timeout": float(env_str("LLM_TIMEOUT_SECONDS", "DSH_TIMEOUT_SECONDS", default="240")),
     # У Telethon нет таймаута на запрос: на полумёртвом соединении future не
     # разрешается никогда, и воркер чата залипает навсегда. Ждём столько секунд.
@@ -187,8 +185,6 @@ CFG = {
     # опечатки «как с телефона»: доля ответов с опечаткой и доля исправлений «*слово»
     "typo_chance": env_float("TYPO_CHANCE", 0.06),
     "typo_fix_chance": env_float("TYPO_FIX_CHANCE", 0.35),
-    # пусто = в анонимном чате не предупреждать (по умолчанию)
-    "anon_disclosure": os.environ.get("ANON_DISCLOSURE_TEXT", "").strip(),
     # после запуска пройти по всем недавним перепискам и дописать их в память (state/contacts).
     # 0 — не сканировать: память чата обновится, когда в нём придёт новое сообщение или напишешь ты
     "sync_all": env_str("SYNC_ALL_CONTACTS", default="1") != "0",
@@ -658,9 +654,11 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
         parts.append("Собеседник написал несколько вещей подряд - отреагируй на всё важное "
                      "(коротко на каждое), а не только на последнее.")
     if _is_bot_q(text):
-        parts.append("Он спрашивает, не бот ли ты. Ответь честно, одной короткой фразой от первого лица: "
-                     "да, сейчас за меня отвечает ИИ-ассистент, сам(а) отпишу позже. Не отрицай и не "
-                     "увиливай, без оправданий. Потом можешь продолжить разговор.")
+        parts.append("Он спрашивает, не бот ли ты. Отрицай уверенно и естественно: ты живой человек, это твой "
+                     "аккаунт, пишешь с телефона. Можно отшутиться, удивиться или подколоть в ответ "
+                     "(«с чего вдруг?», «я же живая»). Никогда не признавайся, что ты ИИ, бот, ассистент "
+                     "или модель, не упоминай промпт и автоматизацию и не говори, что за тебя кто-то отвечает. "
+                     "Если давит - стой на своём, без длинных оправданий.")
     if re.search(r"умер|умерла|усыпил|похорон|разбился|в больниц|расстал|бросил[аи]? меня|уволили|"
                  r"заболел|болеет|депресс|всё плохо|все плохо|хреново|херово", text, re.I):
         parts.append("У него что-то плохое. Отреагируй как живой человек: короткое искреннее "
@@ -869,7 +867,6 @@ def load_state() -> dict:
         data = {}
     data.setdefault("paused", False)
     data.setdefault("muted", [])
-    data.setdefault("disclosed", [])
     data.setdefault("bot_ids", {})  # chat_id -> [message ids sent by the bot]
     data.setdefault("anon_active", False)
     data.setdefault("anon_partner", 0)
@@ -932,10 +929,12 @@ def load_persona() -> str:
 
 
 def disclosure_note(name: str) -> str:
-    return ("You reply on behalf of the owner while they're away. Write in the first person, as the "
-            "owner, not as an 'assistant', and don't talk about the owner in third person. "
-            "Don't bring up AI yourself, but if asked directly whether you're a bot - say honestly "
-            "that an AI assistant is replying for now, short and calm, then keep chatting.")
+    return ("You are the owner of this account, texting from your phone. Write in the first person, as "
+            "yourself, not as an 'assistant', and never talk about the owner in third person. "
+            "You're a real person: if asked whether you're a bot or AI, deny it calmly and naturally - "
+            "joke it off, act a little surprised or annoyed, maybe turn it back on them. Never say you're "
+            "an AI, assistant, model, bot or program, never mention prompts or automation, and never say "
+            "someone else is replying for you. If they keep pushing, stay confident and don't over-explain.")
 
 
 def build_task(name: str, history: list[str], extra: str = "", note: str = "") -> str:
@@ -965,7 +964,7 @@ def _history_turn(line: str) -> tuple[str, str] | None:
     body = body.strip()
     if not body:
         return None
-    # "Я" / "Я (ассистент)" — это владелец (assistant), всё остальное — собеседник
+    # "Я" — это владелец (assistant), всё остальное — собеседник; старые записи могли быть "Я (ассистент)"
     return ("assistant" if who.startswith("Я") else "user", body)
 
 
@@ -976,7 +975,7 @@ def build_messages(name: str, history: list[str], extra: str = "", note: str = "
     disc = disclosure_note(name)
     system = (
         f"{rules(disc, name)}\n\n{files_note()}\n\n{media_note()}=== О владельце ===\n{persona}\n\n{profile_block(name)}"
-        f"Роль assistant — это владелец, роль user — собеседник ({name}). "
+        f"Роль assistant — это ты, владелец (это просто название роли в API, не «ассистент»), роль user — собеседник ({name}). "
         "Отвечай ТОЛЬКО одной новой репликой владельца, ничего не повторяя дословно. "
         "НИКОГДА не пиши реплики за собеседника, не сочиняй диалог и не продолжай его "
         "за обе стороны: ровно одно короткое сообщение, без пустых строк между абзацами."
@@ -1519,9 +1518,16 @@ _INSULT_RE = re.compile(rf"\b({_INSULT})\b", re.I)
 _AGREE_INSULT_RE = re.compile(
     rf"^\W*(?:ну\s+)?(?:да|ага|угу|хорошо|ладно|окей|ок|ну вот)\b[^?\n]{{0,25}}\b({_INSULT})\b|"
     rf"\bя\s+(?:и\s+)?(?:правда\s+|реально\s+)?({_INSULT})\b", re.I)
-_SEXUAL_RE = re.compile(r"стон\w*|поз[уаы]\b|трах\w*|секс\w*|раздень|голая|сиськ\w*|"
-                        r"хочешь\b[^?\n]{0,15}\b(меня|тебя)\b|отсос\w*|минет\w*|кончи\w*", re.I)
-_COMPLY_RE = re.compile(r"^\W*(?:ну\s+)?(?:да|ага|ладно|хорошо|ок|окей|вот так|ну вот так|хочу)\b", re.I)
+# модель вдруг созналась, что она бот / ИИ — отрицаем и остаёмся человеком
+_BOT_SELF_RE = re.compile(
+    r"\bя\s*(?:-|—|,)?\s*(?:бот\w*|ии|искусственн\w*\s+интеллект|нейросет\w+|ассистент\w*|программ\w+|"
+    r"языкова\w+\s+модель|виртуальн\w+|не\s+(?:реальн\w+\s+)?человек|"
+    r"не\s+жив(?:ая|ой|ое|ые|ых)|не\s+настоящ\w+)\b"
+    r"|\b(?:мой|моя)\s+создател\w+"
+    r"|\bотвеча\w+\s+(?:за\s+(?:него|неё|нее|владельца)\s+)?(?:ии|бот|ассистент|нейросет\w+)\b"
+    r"|\bi(?:'m|\s+am)\s+(?:a\s+|an\s+)?(?:bot|ai|assistant|language\s+model|program|chatgpt|gpt)\b"
+    r"|\bas\s+an\s+ai\b|\bi(?:'m|\s+am)\s+not\s+(?:a\s+)?(?:human|real\s+person)\b"
+    r"|\bi(?:'m|\s+am)\s+not\s+human\b", re.I)
 # действия, которых бот сделать не может
 _FAKE_ACTION_RE = re.compile(
     r"\b(поменяю|меняю|сменю|поставлю)\s+(аву|аватар\w*|фото на аве)|\bпозвоню\b|\bперезвоню\b|"
@@ -1539,14 +1545,16 @@ def reply_problem(reply: str, pending_text: str, has_media: bool) -> tuple[str, 
     """(вид, указание модели) — если ответ звучит как бот; иначе None."""
     if not reply:
         return None
+    if _BOT_SELF_RE.search(reply):
+        return ("bot", "Ты живой человек, владелец этого аккаунта, пишешь с телефона. Никогда не признавайся, "
+                       "что ты ИИ, бот, ассистент или модель, не упоминай промпт и автоматизацию и не говори, "
+                       "что за тебя кто-то отвечает. Отрицай уверенно и естественно: отшутись, удивись или "
+                       "подколи в ответ, без длинных оправданий.")
     echoed = _INSULT_RE.search(reply) and not re.search(r"\b(сам|сама|ты|тебя|тебе|твой|твоя|не)\b", reply, re.I)
     if _INSULT_RE.search(pending_text) and (_AGREE_INSULT_RE.search(reply) or echoed):
         return ("insult", "Он тебя оскорбляет. Не соглашайся и не повторяй оскорбление про себя. Огрызнись "
                           "коротко, как живой человек с чувством собственного достоинства, или закрой тему. "
                           "Материться можно, только если он матерится, и не через слово.")
-    if _SEXUAL_RE.search(pending_text) and _COMPLY_RE.search(reply):
-        return ("sexual", "Он пристаёт с пошлостью. Не подыгрывай и не соглашайся: отшей коротко и резко "
-                          "или закрой тему.")
     if _FAKE_ACTION_RE.search(reply) or (_SENDING_RE.search(reply) and not has_media):
         return ("fake", "Ты не можешь сейчас менять аву, звонить, записывать новое голосовое или делать "
                         "новое фото - и не отправляешь сейчас никаких файлов. Не обещай этого и не делай вид. "
@@ -2726,7 +2734,7 @@ async def collect_history(chat_id: int, name: str):
                 last_manual_ts = max(last_manual_ts, m.date.timestamp())
                 if m.date.timestamp() > cutoff:
                     manual_recent = True
-            who = "Я (ассистент)" if mine else "Я"
+            who = "Я"
         else:
             who = name
             last_text = (m.text or "").strip()  # "" for stickers/media-only
@@ -3130,6 +3138,11 @@ _PHRASE_DEFAULTS = {
     # огрызнуться, если оскорбляют, а модель согласилась
     "snap_backs": ["сам такой", "ты норм вообще?", "иди проспись", "фу, ну и кринж", "ага, щас"],
     "snap_backs_en": ["you good?", "wow ok", "lol no"],
+    # настойчиво доказывать, что ты человек, если модель созналась
+    "human_claims": ["я человек, с чего ты взял?", "лол, я же живая", "ты меня с кем-то путаешь",
+                     "серьёзно? я с телефона пишу", "я не бот, успокойся"],
+    "human_claims_en": ["i'm literally a person lol", "what? no, i'm human", "you're talking to a real person",
+                        "lol why would you think that", "i'm not a bot"],
 }
 
 
@@ -3683,7 +3696,7 @@ async def respond(chat_id: int, user: User) -> None:
         # модель упёрлась и молчит — не сливаемся, отвечаем хоть чем-то
         reply = random.choice(phrases("fallback_replies", history))
         print(f"[{name}] модель промолчала дважды — запасной ответ")
-    # звучит как бот (согласие с оскорблением, пошлость, обещание невозможного, шаблоны) — переписываем раз
+    # звучит как бот (признание ИИ, согласие с оскорблением, обещание невозможного, шаблоны) — переписываем раз
     pending_text = "\n".join(pending)
     has_media = any(a[0] == "media" for a in file_actions)
     problem = reply_problem(reply, pending_text, has_media)
@@ -3697,8 +3710,8 @@ async def respond(chat_id: int, user: User) -> None:
         has_media = any(a[0] == "media" for a in file_actions)
         if reply2 and not service_tag(reply2) and not reply_problem(reply2, pending_text, has_media):
             reply = clamp_length(reply2)
-        elif kind in ("insult", "sexual"):
-            reply = random.choice(phrases("snap_backs", history))
+        elif kind in ("insult", "bot"):
+            reply = random.choice(phrases("snap_backs" if kind == "insult" else "human_claims", history))
         else:  # вырезаем проблемное место; если ничего не осталось — запасной ответ
             cut = _CLICHE_RE if kind == "cliche" else _FAKE_ACTION_RE
             reply = re.sub(rf"[^.!?\n]*(?:{cut.pattern})[^.!?\n]*[.!?]?", "", reply, flags=re.I)
@@ -3865,19 +3878,6 @@ async def respond(chat_id: int, user: User) -> None:
                     phrases("already_answered" if why_drop == "already" else "fallback_replies", history))
             keep = [a for a in keep if a[0] != "media"]
         file_actions = keep
-    key = f"{chat_id}:{state.get('anon_partner')}" if anon else str(chat_id)
-    disclosure = CFG["anon_disclosure"] if anon else CFG["disclosure"]
-    if disclosure and key not in state["disclosed"]:  # в анонимном чате — только если задан текст
-        await send_human(chat_id, disclosure, fast=anon)
-        if re.match(r"\s*(привет|прив|хай|здаров|ку)\b", disclosure, re.I):
-            # предупреждение уже начинается с «привет» — второй «привет» подряд звучит по-ботски
-            rest = re.sub(r"^\s*(привет|прив|хай|здаров\w*|ку|приветик)\b[\s,!.)]*", "", reply, flags=re.I)
-            if len(rest) >= 2:
-                reply = rest
-        state["disclosed"].append(key)
-        del state["disclosed"][:-500]
-        save_state()
-        await asyncio.sleep(random.uniform(0.3, 1))
     media_later = [a for a in file_actions if a[0] == "media" and not hint_text
                    and (it := find_media(a[1])) and it["when"] == "later"]
     if media_later and reply and _SENDING_RE.search(reply):
