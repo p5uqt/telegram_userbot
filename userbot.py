@@ -488,6 +488,24 @@ def gap_note(history: list[str]) -> str:
             "что он уже здоровался или уже это писал, и не продолжай старую тему как будто паузы не было.")
 
 
+def stale_note(history: list[str]) -> str:
+    """Его последнее сообщение давно лежит без ответа (бот был выключен, чат был отключён,
+    ответ попросили через tell спустя дни) — модель иначе отвечает так, будто оно пришло только что."""
+    turns = [(l, t) for l, t in ((l, _history_turn(l)) for l in history) if t]
+    if not turns or turns[-1][1][0] != "user":
+        return ""
+    sent = _line_time(turns[-1][0])
+    if not sent:
+        return ""
+    hours = (datetime.now() - sent).total_seconds() / 3600
+    if hours < CFG["gap_hours"]:
+        return ""
+    ago = f"{hours / 24:.0f} дн." if hours >= 36 else f"{hours:.0f} ч."
+    return (f"Его последнее сообщение лежит без ответа уже около {ago} - ты отвечаешь с опозданием. "
+            f"Не делай вид, что ответил{_a()} сразу: можно в двух-трёх словах извиниться за задержку "
+            f"(«сорри, пропал{_a()}», «только увидел{_a()}»), без объяснений и оправданий, и сразу ответить по делу.")
+
+
 def user_repeats(history: list[str]) -> str | None:
     """Собеседник повторил своё прежнее сообщение/вопрос? Возвращает прежний текст.
 
@@ -3604,7 +3622,9 @@ async def respond(chat_id: int, user: User) -> None:
     known = bool(contact_profiles.get(name))
     note = " ".join(x for x in (now_context() if asks_now else "", memory_note(history, known), gender_note(last_text), known_facts(history, name),
                                 situation_note(pending, name, history),
-                                gap_note(history) or repeat_note(history) or stall_note(history),
+                                stale_note(history),
+                                # с твоим указанием «новый заход, старую тему не продолжай» только мешает
+                                ("" if hint_text else gap_note(history)) or repeat_note(history) or stall_note(history),
                                 media_status(chat_id) if MEDIA_SEND else "",
                                 media_ask_note(chat_id, media_asked(history), history) if not hint_text else "") if x)
     if heart_due(history) == "ask":
