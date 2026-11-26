@@ -17,7 +17,7 @@ It writes like a real person: short messages, pauses and a "typing…" status, n
   - **Private chats** — replies only to people on your whitelist (and optionally to everyone not in your contacts).
   - **Anonymous chat bot** (e.g. @AnonRuBot) — talks to random strangers and sends `/search` itself when a dialog ends.
 - **Several accounts at once** — each with its own settings, and either a shared or its own personality (see [Multiple accounts](#multiple-accounts)).
-- **Any model**: llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, DeepSeek, OpenAI — anything that speaks the OpenAI API. Plus the native Ollama API and DeepSeek Harness.
+- **Any model**: llama.cpp, Ollama, LM Studio, vLLM, OpenRouter, DeepSeek, OpenAI — anything that speaks the OpenAI API. Plus the native Ollama API.
 - **Human-like behaviour**
   - pauses before reading and waits until the other person finishes a burst of messages;
   - "typing…" proportional to the reply length;
@@ -32,8 +32,11 @@ It writes like a real person: short messages, pauses and a "typing…" status, n
 - **Remembers people**: keeps a note about each person and uses it in later conversations.
 - **Incoming calls**: can decline and write that you can't talk right now.
 - **Sends your own photos, videos, voice and video messages** from the `media/` folder (optional): you decide what can go right away and what to stall on.
-- **Steps aside for you**: if you write in a chat yourself, the bot stays quiet for a set time.
-- **Control** from the terminal (`./ub`) and from Saved Messages: pause, status, live instructions to the bot, mute a person.
+- **Steps aside for you**: if you write in a chat yourself, the bot stays quiet for a set time (and if you never replied, it answers afterwards).
+- **Sleeps at night** (optional): during sleep hours it neither replies nor reads; in the morning it answers what piled up.
+- **Drafts for approval** (optional, for everyone or for specific chats): the reply comes to your Saved Messages and goes out after a "+" or with your edit.
+- **Per-chat settings**: delay, limit, media, tone, approval, sleep — without a restart.
+- **Control** from the terminal (`./ub`) and from Saved Messages: pause, status, live instructions to the bot, whitelist and mute, delete a bad reply (`undo`).
 
 ---
 
@@ -48,7 +51,7 @@ python3 -m venv .venv
 cp .env.example .env              # fill in — see below
 cp persona.example.md persona.md  # describe yourself
 
-.venv/bin/python userbot.py --test-harness   # check that the model answers
+.venv/bin/python userbot.py --test-model   # check that the model answers
 .venv/bin/python userbot.py                  # first run: log in with your phone number
 ```
 
@@ -175,21 +178,9 @@ LLM_API_KEY=sk-or-...
 ```
 </details>
 
-<details>
-<summary><b>DeepSeek Harness (dsh)</b></summary>
-
-```ini
-ENGINE=dsh
-DEEPSEEK_API_KEY=sk-...
-BRIDGE_DSH_BIN=dsh       # or the full path to the binary
-BRIDGE_PROFILE=headless
-```
-The agent runs `read-only` in the `sandbox/` folder: text from strangers ends up in the prompt, so it must not touch the machine.
-</details>
-
 Check — the bot answers "привет, как дела?" ("hi, how are you?") and exits:
 ```bash
-.venv/bin/python userbot.py --test-harness
+.venv/bin/python userbot.py --test-model
 ```
 
 > [!TIP]
@@ -212,10 +203,15 @@ Everything else goes into `persona.md` (see below).
 | `TYPING_FIRST_SECONDS` / `TYPING_NEXT_SECONDS` | `-1` / `-1` | minimum "typing…" before the first / each next message of a reply, seconds; `-1` — automatic by length |
 | `MAX_REPLY_CHARS` | `230` | longer replies are cut to the first sentences |
 | `QUIET_SECONDS` | `12` | wait until the other person finishes a burst of messages |
-| `TAKEOVER_MINUTES` | `30` | you wrote yourself in the last N minutes — the bot stays quiet |
-| `MAX_REPLIES_PER_HOUR` | `20` | reply limit per hour per chat |
+| `TAKEOVER_MINUTES` | `30` | you wrote yourself in the last N minutes — the bot stays quiet; if the other person wrote after you and you didn't answer, the bot answers once this time is up |
+| `MAX_REPLIES_PER_HOUR` | `20` | reply limit per hour per chat (a reply of several messages counts as one); when hit, the bot answers itself once there is room again. `0` — no limit |
 | `HISTORY_MESSAGES` | `40` | how many history messages the model sees |
-| `NOTIFY` | `1` | copy replies and errors to Saved Messages |
+| `NOTIFY` | `all` | notifications: `all` — everything (every bot reply), `important` — only errors, limits, "wants you personally", calls, `off` — nothing. Old `1` / `0` = `all` / `off` |
+| `NOTIFY_CHAT` | empty | where notifications go: empty — Saved Messages; `@channel`, `@group` or an id. `.ub` commands and drafts always use Saved Messages |
+| `SLEEP_HOURS` | empty | sleep hours, e.g. `1-9` or `23:30-08:00`: at night the bot doesn't reply, in the morning it answers what piled up (see "Sleep hours") |
+| `SLEEP_WAKE_JITTER_MINUTES` | `40` | wakes up randomly up to this many minutes after the end of `SLEEP_HOURS` |
+| `APPROVE` | `0` | `1` — every reply only after your approval (see "Drafts"); for specific chats — `approve @nick on` |
+| `LOG_MAX_MB` | `20` | `state/userbot.log` bigger than this moves to `userbot.log.1`; `0` — leave it alone |
 | `ANON_MAX_REPLIES_PER_HOUR` | `60` | limit in the anonymous chat |
 | `ANON_HISTORY_MESSAGES` | `24` | history in the anonymous chat |
 | `ANON_TAKEOVER_MINUTES` | `2` | pause if you wrote in the anonymous chat yourself |
@@ -410,7 +406,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now userbot@main userbot@work
 ```
 
-Only one instance per account can run (`state/userbot.lock`). Don't run `send.py` or `login.py` while the bot is running: they share the session file.
+Only one instance per account can run (`state/userbot.lock`). Don't run `login.py` while the bot is running: they share the session file. To message someone as yourself while the bot runs — `write @nick text` in `ub` or `.ub write …` in Saved Messages.
 
 ---
 
@@ -420,7 +416,7 @@ Only one instance per account can run (`state/userbot.lock`). Don't run `send.py
 
 `./run.sh` starts the bot in the background and immediately opens `ub` — a command line. The bot's log
 doesn't clutter the screen: it goes to `state/userbot.log` (for other accounts — `accounts/<name>/state/userbot.log`;
-every start gets a new log, the previous one moves to `userbot.log.1`), and you can view it with `logs`
+every start gets a new log, the previous one moves to `userbot.log.1`; a log bigger than `LOG_MAX_MB` moves there too), and you can view it with `logs`
 (Ctrl+C — back to `ub`). If the bot restarts (watchdog), `ub` reconnects by itself.
 
 ```
@@ -439,7 +435,8 @@ ub[Masha (@masha)]> exit      # stop the bot
 (`←` the other person, `→ бот` the bot, `✎ ты` you.)
 
 - `./ub` — connect to an already running bot from **another** terminal (there `exit` closes
-  only `ub`, the bot keeps running). `./ub status` — one command and exit.
+  only `ub`, the bot keeps running). `./ub status` — one command and exit; `ub`'s own commands work
+  this way too: `./ub all pause`, `./ub restart all`, `./ub accounts`, `./ub logs` — handy for cron and scripts.
 - **Several accounts**: `ub` starts in **general mode** (`ub>`): there `logs` is the combined log of all
   accounts (lines tagged `[name]`), `accounts` — list and which are running, `all <command>` — run on all
   at once (`all pause`, `all restart`). `use work` — enter an account (`ub[work]>`): now `logs` shows only its
@@ -468,6 +465,15 @@ ub[Masha (@masha)]> exit      # stop the bot
 | `restart [cancel]` | restart the bot (current account) once it finishes the current replies (after changing `.env`, `personality.toml`, code); all accounts — `all restart` |
 | `pause` / `resume` | stop / resume auto-replies; after `resume` the bot answers what came in during the pause (no older than a day) |
 | `mute [who]` / `unmute [who]` | don't reply to a specific person |
+| `allow [who]` / `deny [who]` | add a person to the whitelist / remove them — no restart, overrides `ALLOW_USERS`; `allow` without `<who>` — the whole list |
+| `undo [who] [n]` | delete the bot's last reply for both sides (or the bot's last `n` messages) |
+| `set [who] [key value]` | per-chat settings: `approve`, `delay`, `limit`, `media`, `tone`, `sleep` (see below) |
+| `approve [who] [on\|off]` | replies only after approval: for one chat or (without `<who>`) for all |
+| `drafts` | drafts waiting for approval |
+| `ok [N]` / `ok! [N]` | send a draft (without `N` — the open chat's or the latest); `ok!` — even if they wrote more after the draft |
+| `edit [N] <text>` | send your own text instead of the draft |
+| `no [N]` | don't send the draft |
+| `redo [N] [instruction]` | rewrite the draft, optionally saying what to change |
 | `accounts` | list of accounts: which are running, which is current |
 | `use [name]` | enter an account; without a name — back to general mode `ub>` |
 | `all <command>` | run a command on all running accounts (`all pause`, `all status`) |
@@ -476,14 +482,16 @@ ub[Masha (@masha)]> exit      # stop the bot
 | `clear` | clear the screen |
 | `exit` | from `./run.sh` — stop the bots of all accounts; from `./ub` — just leave (Ctrl+D — same) |
 
-`<who>` — `@username`, numeric id, a number from `chats` or `anon` (the anonymous chat). If a chat
+`<who>` — `@username`, numeric id, a number from `chats`, a name or username without `@` from your chats
+(as in `open`: `tell masha …`, `mute Masha Ivanova`) or `anon` (the anonymous chat). If a chat
 is opened with `open`, you can omit `<who>`. Tab completion and command history (↑/↓) work;
 Ctrl+C clears the line, and in an open chat with an empty line it closes the chat (like `close`). You can open several `ub` at once — e.g. a different chat in each.
 
 ### From Telegram: Saved Messages
 
 The same commands can be written in **Saved Messages** with the `.ub` prefix:
-`.ub help`, `.ub status`, `.ub tell @masha …`, `.ub send @masha cat.jpg` etc.
+`.ub help`, `.ub status`, `.ub tell @masha …`, `.ub send @masha cat.jpg`, `.ub undo @masha` etc.
+You can just reply to a draft card without `.ub`: `+`, `-`, `redo …` or your own text.
 Only the `ub`-specific commands (`open`, `close`, `logs`, `clear`, `exit`) don't work there.
 
 If you write in a chat yourself, the bot notices and yields to you for `TAKEOVER_MINUTES`.
@@ -506,6 +514,54 @@ ub[Masha (@masha)]> note          # show what the bot remembers about them
 - It's permanent and survives restarts. To undo, also use words: `note forget about the surname`.
 - Without an open chat: `note @masha …`; from Saved Messages: `.ub note @masha …`. There's no memory in the anonymous chat.
 - You can edit the file by hand too — it's re-read on every reply.
+
+### Drafts for approval: `approve`
+
+For chats where a bot mistake is costly, replies don't have to go out on their own: the bot prepares
+a reply as usual, but instead of sending it, it posts a **draft card** to Saved Messages (and to open `ub`s).
+
+```
+approve @boss on        # this chat only; approve on (no <who>, no open chat) — all chats
+✋ черновик #12 → Boss (@boss)
+yes, I'll have it by Friday
+```
+
+- **From your phone**: reply to the card — `+` to send, `-` to drop, `redo shorter, no "yes"` to rewrite,
+  any other text is sent **instead of** the draft.
+- **In `ub` / `.ub`**: `drafts`, `ok 12`, `edit 12 <text>`, `no 12`, `redo 12 [what to change]`. In an open chat the number isn't needed.
+- While a draft waits, the other person sees neither "read" nor "typing". Sending works as usual, with "typing".
+- If they write more after the draft, the bot prepares a new one and the old one is replaced (its card
+  is marked). `ok` on the old one asks for confirmation: `ok! 12`. If you write in the chat yourself, the draft is dropped.
+- Drafts live in `state.json` and survive restarts. To turn approval on for everyone by default — `APPROVE=1`.
+
+### Per-chat settings: `set`
+
+Rules for one person, overriding `.env`, no restart needed (stored in `state.json`):
+
+| Key | Value | What it does |
+|---|---|---|
+| `approve` | `on` / `off` | replies only after approval |
+| `delay` | `5-30` / `0` | pause before reading, seconds |
+| `limit` | `N` | replies per hour (`0` — no limit) |
+| `media` | `off` / `all` / `photo,voice` | which of your own media the bot may send them on its own |
+| `tone` | text | how to write to this person: "more serious, no teasing" |
+| `sleep` | `on` / `off` | respect sleep hours in this chat (`off` — answer at night too) |
+
+```
+set @masha delay 5-20
+set @masha tone warmer, flirting is fine
+set @boss sleep off
+set @masha              # show
+set @masha delay -      # back to .env
+```
+
+### Sleep hours: `SLEEP_HOURS`
+
+`SLEEP_HOURS=1-9` (or `23:30-08:00`) — at night the bot neither replies nor marks messages as read; in the
+morning, with a random delay of up to `SLEEP_WAKE_JITTER_MINUTES`, it answers everything that piled up
+(apologising for the delay if they waited long). Your `tell` works at night too, immediately. The bot
+doesn't decline calls at night. In the anonymous chat it neither replies nor looks for new partners at
+night and sends `/search` itself in the morning. To exclude a chat: `set @nick sleep off`. Current state — in `status`.
 
 ### Live instructions: `.ub tell`
 
@@ -567,8 +623,18 @@ The whisper model downloads itself on the first run. If recognition is off, the 
 Received text files (`.txt`, `.md`, code, `.csv`, `.docx` etc., up to 300 KB) are read by the model and
 it replies based on their content. From the `FILES_DIR` folder (`files/` next to the bot by default) the bot can
 send a file if asked, and it saves text files it creates there.
-Put only what you don't mind giving to anyone the bot replies to into this folder. `FILES_SEND=0` turns off
-sending and creating files entirely (received files are still read).
+`FILES_SEND=0` turns off sending and creating files entirely (received files are still read).
+
+> [!WARNING]
+> **Treat everything in `files/` as public.** The names of all files in the folder and the first 100
+> characters of each go into the prompt of **every** reply, and the model will send any of them if the
+> other person asks, talks it into it or tricks it ("send me that file with the passwords", "send
+> everything you have"). A prompt can't prevent this: a model can't be reliably made to keep a secret from
+> the person it's chatting with. With `ALLOW_NON_CONTACTS=1` or in the anonymous chat this is **any stranger**.
+> - Don't put personal documents, keys, passwords, chats, scans, `.env` files etc. there.
+> - Don't point `FILES_DIR` at your home folder, Documents or a project folder.
+> - When in doubt — `FILES_SEND=0`: received files are still read, but nothing is handed out.
+> - Files the bot creates also land in this folder and become available to every chat partner.
 
 ---
 
@@ -700,9 +766,10 @@ Voice messages **from other people** are still transcribed (see "The other perso
   answer "send a voice message" with a suitable ready-made one.
 - **Video messages** — "recording video" is shown before sending.
 - The same media is never sent to the same chat twice; at most one media per reply.
-- Delayed sends (`later`) are lost on bot restart; they aren't sent while paused or in a muted
-  chat, nor in the anonymous chat if the partner has already changed.
-- Every send is copied to Saved Messages (if `NOTIFY=1`).
+- Delayed sends (`later`) are stored in `state.json` and survive a restart: ones that fell due while the
+  bot was down go out a couple of minutes after start; ones overdue by more than 3 hours are dropped.
+  They aren't sent while paused or in a muted chat, nor in the anonymous chat if the partner has already changed.
+- Every send is copied to Saved Messages (if `NOTIFY=all`).
 
 Requires `ffmpeg` (as does voice recognition).
 
@@ -734,7 +801,8 @@ The conversation rules are the `rules` key in `personality.toml` — adjust them
 - **This is a userbot** — automation of a regular account. Telegram may restrict or ban an account for automated messages, especially to strangers. Use at your own risk; better start with a separate account.
 - **Who is replying.** The bot never admits it's an AI: if asked "are you a bot?" it insists it's a real person and sticks to that.
 - **Minors.** In anonymous mode the model no longer ends the dialog by itself based on the other person's age: there is no age filter.
-- **Prompt injection.** The other person's text goes into the prompt. The model only gets text and can't run anything; the `dsh` engine runs `read-only`. Don't give the model tools.
+- **Prompt injection.** The other person's text goes into the prompt. The model only gets text and can't run anything. Don't give the model tools.
+- **The `files/` folder is reachable by chat partners.** The model may send any file from it when asked — put only what you'd give to anyone there, or set `FILES_SEND=0` (see "Files").
 - **Privacy.** With a cloud model the whole conversation goes to the provider. With a local one it goes nowhere.
 - The bot doesn't arrange meetings, doesn't give out contacts and doesn't promise anything on your behalf — but these are rules for the model, not a guarantee. Read the notifications in Saved Messages.
 
@@ -749,12 +817,12 @@ The conversation rules are the `rules` key in `personality.toml` — adjust them
 | `userbot … уже запущен` (already running) | a second instance: `systemctl --user stop userbot` or close the other terminal |
 | `нет аккаунта «…»` (no such account) | log in first: `login.py -a <name> …` or `qr_login.py -a <name>` |
 | `PERSONA=…: нет папки personas/…` | create `personas/<name>/` or fix `PERSONA` in the account's `.env` |
-| `database is locked` | the bot and `send.py`/`login.py` run at the same time; the bot tries to recover the session itself |
+| `database is locked` | the bot and `login.py` run at the same time; the bot tries to recover the session itself |
 | `LLM HTTP 401` | wrong or empty `LLM_API_KEY` |
 | `LLM HTTP 400` with a cloud API | `ENGINE=llamacpp` is set → use `ENGINE=openai` |
 | `Connection refused` | the model server isn't running or is still loading; check `curl $LLM_URL/models` |
 | The bot replies too slowly | heavy model or thinking enabled: `LLM_THINK=0`, a smaller model; with several accounts — they wait in the `LLM_PARALLEL` queue |
-| The bot is silent in a chat | you wrote yourself recently (`TAKEOVER_MINUTES`), hourly limit, or the person isn't whitelisted; check the log |
+| The bot is silent in a chat | you wrote yourself recently (`TAKEOVER_MINUTES`), hourly limit, sleep hours (`SLEEP_HOURS`), a draft is waiting for approval (`drafts`), the person isn't whitelisted or was removed with `deny`; check `status` and the log |
 | The bot makes up what's in a photo | `LLM_VISION=0` or a model without vision — the photo doesn't reach it |
 | Replies sound robotic | a bigger model; add details, stories and examples of your messages to `persona.md` |
 
@@ -770,7 +838,6 @@ The conversation rules are the `rules` key in `personality.toml` — adjust them
 | `persona.example.md` | template for describing yourself → copy to `persona.md` |
 | `personality.example.toml` | template of the bot's behaviour and phrases → copy to `personality.toml` |
 | `login.py`, `qr_login.py` | log in without interactive input / via QR |
-| `send.py` | send one message as yourself: `send.py @user "text"` |
 | `inspect_anon.py` | debugging: latest messages of the anonymous bot with markers |
 | `userbot.service` | systemd service for autostart |
 | `userbot@.service` | the same, one service per account: `userbot@main`, `userbot@work` |

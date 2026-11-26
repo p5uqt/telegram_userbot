@@ -3,7 +3,7 @@
 Telegram userbot: replies in private chats on your behalf with an LLM.
 
 Engines: any OpenAI-compatible API (llama.cpp, Ollama /v1, LM Studio, vLLM,
-OpenRouter, DeepSeek, OpenAI...), Ollama native API, or DeepSeek Harness (dsh).
+OpenRouter, DeepSeek, OpenAI...) or the native Ollama API.
 
 - Answers only whitelisted chats (and optionally non-contacts), or only one
   anonymous-chat bot (ANON_BOT) with auto /search and /next.
@@ -17,6 +17,7 @@ status | pause | resume | mute | tell | note | restart ... (`help` lists everyth
 """
 import asyncio
 import base64
+import contextlib
 import contextvars
 import fcntl
 import io
@@ -121,10 +122,8 @@ CFG = {
     "api_hash": os.environ.get("TG_API_HASH", ""),
     "allow": set(env_list("ALLOW_USERS")),
     "allow_non_contacts": os.environ.get("ALLOW_NON_CONTACTS", "0") == "1",
-    "dsh_bin": os.environ.get("BRIDGE_DSH_BIN", "dsh"),
-    "profile": os.environ.get("BRIDGE_PROFILE", "headless"),
     # Движок: openai (любой OpenAI-совместимый API), llamacpp (то же + параметры
-    # llama-server), ollama (родной API Ollama), dsh (DeepSeek Harness)
+    # llama-server), ollama (родной API Ollama)
     "engine": os.environ.get("ENGINE", "openai").strip().lower(),
     "ollama_url": os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/"),
     "ollama_model": os.environ.get("OLLAMA_MODEL", "qwen3:8b"),
@@ -162,8 +161,23 @@ CFG = {
     # пауза в переписке, после которой новое «привет» — нормальное приветствие
     "gap_hours": env_float("CONVERSATION_GAP_HOURS", 2),
     "anon_history": int(env_float("ANON_HISTORY_MESSAGES", 24)),
-    "notify": os.environ.get("NOTIFY", "1") == "1",
-    "timeout": float(env_str("LLM_TIMEOUT_SECONDS", "DSH_TIMEOUT_SECONDS", default="240")),
+    # уведомления: all — всё (каждый ответ бота), important — только важное (ошибки, лимиты,
+    # «ждёт тебя лично», звонки), off — ничего. Старые значения: 1 = all, 0 = off
+    "notify": {"0": "off", "off": "off", "no": "off", "false": "off", "нет": "off",
+               "important": "important", "errors": "important", "важное": "important", "2": "important",
+               }.get(os.environ.get("NOTIFY", "1").strip().lower(), "all"),
+    # куда слать уведомления: пусто — «Избранное»; @канал / @группа / числовой id
+    "notify_chat": os.environ.get("NOTIFY_CHAT", "").strip(),
+    # часы сна: «1-9», «23:30-08:00»; ночью бот не отвечает, утром отвечает на накопившееся. Пусто — выключено
+    "sleep": os.environ.get("SLEEP_HOURS", "").strip(),
+    # просыпается не ровно в конец SLEEP_HOURS, а случайно до стольких минут позже
+    "sleep_jitter": env_float("SLEEP_WAKE_JITTER_MINUTES", 40),
+    # 1 = ответы не уходят сами: бот присылает черновик в «Избранное», ты подтверждаешь (ok / edit / no).
+    # Можно включать для отдельных чатов: approve @ник on
+    "approve": env_str("APPROVE", default="0") == "1",
+    # лог state/userbot.log больше стольких МБ — уезжает в userbot.log.1 и начинается заново. 0 — не трогать
+    "log_max_mb": env_float("LOG_MAX_MB", 20),
+    "timeout": float(env_str("LLM_TIMEOUT_SECONDS", default="240")),
     # У Telethon нет таймаута на запрос: на полумёртвом соединении future не
     # разрешается никогда, и воркер чата залипает навсегда. Ждём столько секунд.
     "tg_timeout": float(env_str("TG_TIMEOUT_SECONDS", default="60")),
@@ -620,7 +634,7 @@ async def sticker_intent(history: list[str]) -> str:
         if CFG["engine"] in ("openai", "llamacpp"):
             raw = await llm_thread(_openai_call, msgs, 10)
         else:
-            raw = await run_harness(msgs[0]["content"] + "\n\n" + PHOTO_TAG_RE.sub(media_plain, lines))
+            raw = await llm_thread(_ollama_call, msgs)
     except Exception as exc:  # noqa: BLE001
         print(f"[sticker] не смог понять стикер: {exc}", file=sys.stderr)
         return "непонятно"
@@ -689,7 +703,7 @@ def situation_note(pending: list[str], name: str, history: list[str]) -> str:
     if re.search(r"\[голосовое сообщение\]", text):
         parts.append("Он прислал голосовое/кружок - ты его не слышишь и не видишь. Не делай вид, "
                      "что послушал: скажи, что щас не можешь послушать, и попроси написать текстом.")
-    if _VOICE_ASK_RE.search(text) and "voice" in MEDIA_SEND and any(
+    if _VOICE_ASK_RE.search(text) and "voice" in media_send() and any(
             it["kind"] == "voice" for it in load_media().values()):
         ex = random.choice(("лови", "вот, слушай", "короче, слушай", "щас расскажу", "ну держи", "ок, слушай"))
         parts.append("Он просит голосовое. Если одно из твоих готовых голосовых из списка медиа подходит "
@@ -873,7 +887,6 @@ def is_anon_system(msg) -> bool:
     return bool(msg.reply_markup) or bool(ANON_SYSTEM_RE.search(msg.raw_text or ""))
 
 STATE_FILE = STATE_DIR / "state.json"
-SANDBOX = HERE / "sandbox"
 PERSONA_FILE = persona_file("persona.md")
 print(f"[личность] о себе: {_rel(PERSONA_FILE) if PERSONA_FILE.exists() else 'persona.example.md'}")
 
@@ -889,6 +902,12 @@ def load_state() -> dict:
     data.setdefault("anon_active", False)
     data.setdefault("anon_partner", 0)
     data.setdefault("anon_gender", None)  # None | "girl" | "boy"
+    data.setdefault("allow_add", {})     # id → подпись: добавлены командой allow (сверх ALLOW_USERS)
+    data.setdefault("allow_del", {})     # id → подпись: убраны командой deny (главнее .env)
+    data.setdefault("chat_cfg", {})      # id → настройки чата (команда set)
+    data.setdefault("drafts", [])        # черновики, ждущие подтверждения (APPROVE / approve)
+    data.setdefault("media_queue", [])   # отложенные медиа: переживают перезапуск
+    data.setdefault("last_reply", {})    # id чата → id сообщений последнего ответа бота (undo)
     return data
 
 
@@ -902,10 +921,19 @@ def save_state() -> None:
     tmp.replace(STATE_FILE)
 
 
+_reply_group: dict[int, list[int]] = {}   # chat_id → id сообщений текущего ответа (для undo)
+
+
 def remember_bot_msg(chat_id: int, msg_id: int) -> None:
     ids = state["bot_ids"].setdefault(str(chat_id), [])
     ids.append(msg_id)
     del ids[:-300]
+    if chat_id in _reply_group:
+        _reply_group[chat_id].append(msg_id)
+    if ANON_CHAT_ID is not None and chat_id == ANON_CHAT_ID:
+        # своих отправок Telegram этому клиенту не присылает — on_outgoing их не видит,
+        # поэтому «мы написали» для таймера /next отмечаем здесь
+        anon_touch("out")
 
 
 def is_bot_msg(chat_id: int, msg_id: int) -> bool:
@@ -923,7 +951,7 @@ def bot_sent(chat_id: int, msg) -> None:
         print(f"[ub] не показал сообщение бота: {exc}", file=sys.stderr)
 
 
-# ── harness ──────────────────────────────────────────────────────────────────
+# ── промпт ───────────────────────────────────────────────────────────────────
 
 def rules(disclosure_note: str, seed: str = "") -> str:
     # примеры выбираем детерминированно по чату: разным собеседникам — разные,
@@ -955,23 +983,6 @@ def disclosure_note(name: str) -> str:
             "someone else is replying for you. If they keep pushing, stay confident and don't over-explain.")
 
 
-def build_task(name: str, history: list[str], extra: str = "", note: str = "") -> str:
-    if CFG["engine"] != "dsh":
-        # сплошной текст нужен только движку dsh; остальным идёт build_messages — не собираем
-        # второй такой же промпт (persona, список медиа, файлы) впустую на каждый запрос
-        return ""
-    persona = load_persona()
-    disc = disclosure_note(name)
-    task = (
-        f"{rules(disc, name)}\n\n{files_note()}\n\n{media_note()}=== О владельце ===\n{persona}\n\n{profile_block(name)}"
-        f"=== Собеседник: {name}. Время: {time_hint()} ===\n"
-        + PHOTO_TAG_RE.sub(media_unseen, "\n".join(history))
-        + (f"\n\n=== Подсказка ===\n{note}" if note else "")
-        + "\n\n=== Напиши следующий ответ владельца ==="
-    )
-    return f"{task}\n\n{extra}" if extra else task
-
-
 def _history_turn(line: str) -> tuple[str, str] | None:
     """Разобрать строку истории "[дата] кто: текст" в (роль, текст)."""
     try:
@@ -987,8 +998,8 @@ def _history_turn(line: str) -> tuple[str, str] | None:
 
 
 def build_messages(name: str, history: list[str], extra: str = "", note: str = "") -> list[dict]:
-    """Та же задача, но настоящими ролями чата — слабая локальная модель так
-    не путает свои реплики с чужими и не проигрывает обе стороны диалога."""
+    """Промпт для модели настоящими ролями чата (system/user/assistant) — слабая локальная модель
+    так не путает свои реплики с чужими и не проигрывает обе стороны диалога."""
     persona = load_persona()
     disc = disclosure_note(name)
     system = (
@@ -1064,17 +1075,6 @@ def _with_photos(msg: dict) -> dict:
     if not any(p["type"] == "image_url" for p in parts):
         return {**msg, "content": PHOTO_TAG_RE.sub(media_unseen, text)}
     return {**msg, "content": parts}
-
-
-def child_env() -> dict:
-    env = dict(os.environ)
-    for key in ("DSH_PROFILE", "DSH_PROFILE_DIR", "DSH_SESSION_ID", "DSH_WEB_URL"):
-        env.pop(key, None)
-    # Strangers' text goes into the prompt: never let the agent touch the machine.
-    env["DSH_PERMISSION_MODE"] = "read-only"
-    for key in ("TG_API_ID", "TG_API_HASH"):
-        env.pop(key, None)
-    return env
 
 
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
@@ -1229,51 +1229,16 @@ async def run_openai(messages: list[dict]) -> str:
     return (first + "\n" + tags).strip()
 
 
-async def run_harness(task: str, messages: list[dict] | None = None) -> str:
+ENGINES = ("openai", "llamacpp", "ollama")
+
+
+async def run_model(messages: list[dict]) -> str:
+    """Один ответ модели по ролям system/user/assistant (ENGINE из .env)."""
     if CFG["engine"] in ("openai", "llamacpp"):
-        return await run_openai(messages or [{"role": "user", "content": task}])
+        return await run_openai(messages)
     if CFG["engine"] == "ollama":
-        return await run_ollama(messages or [{"role": "user", "content": task}])
-    if CFG["engine"] != "dsh":
-        raise RuntimeError(f"неизвестный ENGINE={CFG['engine']!r}: openai | llamacpp | ollama | dsh")
-    SANDBOX.mkdir(exist_ok=True)
-    proc = await asyncio.create_subprocess_exec(
-        CFG["dsh_bin"], "--profile", CFG["profile"], "--json", "-",
-        cwd=SANDBOX, env=child_env(),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(task.encode()), CFG["timeout"])
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError("dsh: timeout")
-    except asyncio.CancelledError:
-        proc.kill()  # stranger left / /next — don't leave an orphaned dsh running
-        try:
-            await proc.wait()
-        except Exception:  # noqa: BLE001
-            pass
-        raise
-    final, error = None, None
-    for line in out.decode(errors="replace").splitlines():
-        try:
-            ev = json.loads(line)
-        except ValueError:
-            continue
-        if ev.get("type") == "final":
-            final = str(ev.get("text") or "")
-        elif ev.get("type") == "error":
-            error = ev.get("message") or json.dumps(ev, ensure_ascii=False)
-        elif ev.get("type") == "status" and isinstance(ev.get("reason"), dict):
-            if ev["reason"].get("kind") == "error":
-                e = ev["reason"].get("error") or {}
-                error = f"{e.get('code', '')}: {e.get('message', '')}".strip(": ")
-    if error and not final:
-        raise RuntimeError(f"dsh: {error}")
-    if final is None:
-        tail = err.decode(errors="replace").strip()[-500:]
-        raise RuntimeError(f"dsh exit {proc.returncode}: {error or tail or 'no final event'}")
-    return final.strip()
+        return await run_ollama(messages)
+    raise RuntimeError(f"неизвестный ENGINE={CFG['engine']!r}: {' | '.join(ENGINES)}")
 
 
 # ── telegram ─────────────────────────────────────────────────────────────────
@@ -1328,6 +1293,11 @@ def allowed(u: User) -> bool:
         return False
     if str(u.id) in state["muted"]:
         return False
+    # команды allow / deny — без перезапуска и главнее .env
+    if str(u.id) in state["allow_del"]:
+        return False
+    if str(u.id) in state["allow_add"]:
+        return True
     if str(u.id) in CFG["allow"] or (u.username or "").lower() in CFG["allow"]:
         return True
     # номер телефона: «+380 99 123-45-67» в ALLOW_USERS. Telegram отдаёт номер,
@@ -1362,12 +1332,18 @@ async def tg_iter(aiter, timeout: float | None = None) -> list:
     return out
 
 
-async def notify(text: str) -> None:
-    if CFG["notify"]:
-        try:
-            await tg(client.send_message("me", text[:4000]))
-        except Exception as exc:  # noqa: BLE001
-            print("[notify]", exc, file=sys.stderr)
+NOTIFY_TARGET = "me"   # куда идут уведомления (NOTIFY_CHAT разрешается в main)
+
+
+async def notify(text: str, important: bool = False) -> None:
+    """Уведомление тебе. important — ошибки, лимиты, «ждёт тебя лично», звонки: приходят и при
+    NOTIFY=important; остальное (каждый ответ бота, отправленные файлы) — только при NOTIFY=all."""
+    if CFG["notify"] == "off" or (CFG["notify"] == "important" and not important):
+        return
+    try:
+        await tg(client.send_message(NOTIFY_TARGET, text[:4000]))
+    except Exception as exc:  # noqa: BLE001
+        print("[notify]", exc, file=sys.stderr)
 
 
 # ── файлы ────────────────────────────────────────────────────────────────────
@@ -1673,10 +1649,9 @@ async def do_file_actions(chat_id: int, acts: list[tuple], name: str, anon: bool
                 continue
             async with client.action(chat_id, "document"):
                 await asyncio.sleep(random.uniform(0.5, 1.5))
-            msg = await client.send_file(chat_id, str(path), force_document=True)
+            msg = await tg(client.send_file(chat_id, str(path), force_document=True), CFG["tg_timeout"] * 3)
             bot_sent(chat_id, msg)
             doc_cache[msg.id] = read_text_file(path)
-            sent_log.setdefault(chat_id, []).append(time.time())
             print(f"[{chat_id}] → файл {path.name}" + (" (создан)" if act[0] == "create" else ""))
             await notify(f"📎 → {name}: {path.name}")
             ok += 1
@@ -1693,6 +1668,14 @@ MEDIA_KINDS = ("photo", "video", "voice", "round")
 MEDIA_SEND = {k.strip().lower() for k in env_list("MEDIA_SEND")} & set(MEDIA_KINDS)
 if "all" in {k.strip().lower() for k in env_list("MEDIA_SEND")}:
     MEDIA_SEND = set(MEDIA_KINDS)
+# виды медиа для чата, которому сейчас готовится ответ (set <кто> media …); None — как MEDIA_SEND
+CHAT_MEDIA: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar("CHAT_MEDIA", default=None)
+
+
+def media_send() -> set[str]:
+    """Какие виды медиа бот может слать сам — с учётом настройки текущего чата."""
+    kinds = CHAT_MEDIA.get()
+    return MEDIA_SEND if kinds is None else kinds
 # у своей личности — свои фото/голосовые: media/ ищется так же, как persona.md
 MEDIA_DIR = Path(os.environ.get("MEDIA_DIR") or persona_file("media")).resolve()
 MEDIA_CACHE = MEDIA_DIR / ".cache"
@@ -1758,9 +1741,12 @@ def media_asked(history: list[str]) -> set[str] | None:
 
 MEDIA_TAG_RE = re.compile(r"\[\s*(?:медиа|media)\s*:\s*([^\]\n]+?)\s*\]", re.I)
 _media_tasks: dict[str, asyncio.Task] = {}   # отложенные отправки: "chat:имя" → задача
-# отложенные отправки не переживают перезапуск — снимаем их пометки, иначе медиа «застрянет»
-for _chat in state.get("media_chats", {}).values():
-    for _k in [k for k, v in _chat.items() if v == "pending"]:
+# отложенные отправки сохранены в state["media_queue"] и после перезапуска уходят снова
+# (restore_media_queue). Пометки «pending» без записи в очереди — от прерванной отправки «сразу»:
+# снимаем, иначе медиа «застрянет»
+_queued = {(str(e.get("chat_id")), e.get("name")) for e in state["media_queue"]}
+for _cid, _chat in state.get("media_chats", {}).items():
+    for _k in [k for k, v in _chat.items() if v == "pending" and (_cid, k) not in _queued]:
         del _chat[_k]
 
 
@@ -1826,7 +1812,7 @@ def load_media(kinds: set[str] | None = None) -> dict[str, dict]:
     включённые в MEDIA_SEND виды; команды из «Избранного» видят все. Во время ответа собеседнику —
     только медиа на его языке (MEDIA_LANG)."""
     chat_lang = MEDIA_LANG.get()
-    kinds = MEDIA_SEND if kinds is None else kinds
+    kinds = media_send() if kinds is None else kinds
     if not kinds or not MEDIA_DIR.is_dir():
         return {}
     meta: dict[str, dict] = {}
@@ -1940,9 +1926,10 @@ def media_on_topic(history: list[str], items: list[tuple[str, dict]]) -> list[st
 def media_ask_note(chat_id: int, asked: set[str] | None, history: list[str] | None = None) -> str:
     """Подсказка к конкретной просьбе: что именно он просит и какие файлы ЭТОГО вида у тебя есть.
     Без неё модель путается (на «скинь фото» ставит тег видео или голосового)."""
-    if asked is None or not MEDIA_SEND:
+    allowed_kinds = media_send()
+    if asked is None or not allowed_kinds:
         return ""
-    kinds = (asked & MEDIA_SEND) if asked else set(MEDIA_SEND)
+    kinds = (asked & allowed_kinds) if asked else set(allowed_kinds)
     what = ", ".join(MEDIA_KIND_RU[k] for k in MEDIA_KINDS if k in asked) or "что-нибудь (вид не уточнил)"
     done = media_sent_in(chat_id)
     items = [(rel, it) for rel, it in load_media(kinds).items() if not done.get(it["name"])] if kinds else []
@@ -2142,7 +2129,8 @@ def _media_label(it: dict) -> str:
 
 
 async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | None,
-                         force: bool = False, caption: str | None = None) -> None:
+                         force: bool = False, caption: str | None = None, count: bool = False) -> None:
+    """count — засчитать в лимит ответов в час (отложенное медиа уходит отдельно от ответа)."""
     done = media_sent_in(chat_id)
     if not force and (state["paused"] or str(chat_id) in state["muted"]):
         done.pop(it["name"], None)
@@ -2156,7 +2144,7 @@ async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | 
     if not msg_id:
         done.pop(it["name"], None)
         save_state()
-        await notify(f"🖼 {name}: не смог отправить {it['name']}")
+        await notify(f"🖼 {name}: не смог отправить {it['name']}", important=True)
         return
     remember_bot_msg(chat_id, msg_id)
     done[it["name"]] = f"sent:{msg_id}"   # id — чтобы потом проверить, не удалено ли
@@ -2165,7 +2153,8 @@ async def _deliver_media(chat_id: int, it: dict, name: str, anon_partner: int | 
     keys = list(state["media_msgs"])
     for k in keys[:-500]:
         state["media_msgs"].pop(k, None)
-    sent_log.setdefault(chat_id, []).append(time.time())
+    if count:
+        count_reply(chat_id)
     save_state()
     if any(c["chat"] and c["chat"].id == chat_id for c in CONTROL_CONNS):
         try:
@@ -2223,23 +2212,63 @@ async def do_media_action(chat_id: int, ref: str, name: str, anon: bool = False,
     lo, hi = sorted(it["delay"])
     wait = random.uniform(lo, hi) * 60
     done[it["name"]] = "pending"
+    entry = {"chat_id": chat_id, "name": it["name"], "due": time.time() + wait,
+             "anon_partner": anon_partner, "who": name}
+    state["media_queue"].append(entry)
     save_state()
     print(f"[{name}] {it['name']} — потяну время, отправлю через {int(wait // 60)} мин")
     await notify(f"⏳ {name}: {it['name']} уйдёт через ~{int(wait // 60)} мин")
+    schedule_later_media(entry, it)
+    return True
+
+
+def schedule_later_media(entry: dict, it: dict) -> None:
+    """Отложенная отправка по записи из state["media_queue"]: запись живёт, пока медиа не ушло,
+    поэтому перезапуск бота её не теряет (см. restore_media_queue)."""
+    chat_id, key = entry["chat_id"], f"{entry['chat_id']}:{entry['name']}"
 
     async def later() -> None:
         try:
-            await asyncio.sleep(wait)
-            await _deliver_media(chat_id, it, name, anon_partner)
+            await asyncio.sleep(max(0.0, entry["due"] - time.time()))
+            await _deliver_media(chat_id, it, entry["who"], entry.get("anon_partner"), count=True)
+        except asyncio.CancelledError:
+            _media_tasks.pop(key, None)
+            raise   # остановка бота: запись остаётся в очереди и уйдёт после перезапуска
         except Exception as exc:  # noqa: BLE001
-            print(f"[{name}] отложенное медиа не ушло: {exc}", file=sys.stderr)
+            print(f"[{entry['who']}] отложенное медиа не ушло: {exc}", file=sys.stderr)
             media_sent_in(chat_id).pop(it["name"], None)
-            save_state()
-        finally:
-            _media_tasks.pop(f"{chat_id}:{it['name']}", None)
+        _media_tasks.pop(key, None)
+        _drop_queue_entry(entry)
 
-    _media_tasks[f"{chat_id}:{it['name']}"] = asyncio.create_task(later())
-    return True
+    _media_tasks[key] = spawn(later())
+
+
+def _drop_queue_entry(entry: dict) -> None:
+    if entry in state["media_queue"]:
+        state["media_queue"].remove(entry)
+        save_state()
+
+
+async def restore_media_queue() -> None:
+    """После запуска: отложенные медиа, обещанные до перезапуска, уходят по расписанию.
+    Просроченные (бот был выключен) — через пару минут; просроченные больше чем на 3 ч — уже не к месту."""
+    now = time.time()
+    for entry in list(state["media_queue"]):
+        it = find_media(entry.get("name", ""), set(MEDIA_KINDS))
+        late = now - entry.get("due", 0)
+        if not it or late > 3 * 3600:
+            print(f"[медиа] отложенное {entry.get('name')} для {entry.get('who')} — "
+                  + ("файла больше нет" if not it else "слишком поздно, не отправляю"))
+            media_sent_in(entry["chat_id"]).pop(entry.get("name"), None)
+            state["media_queue"].remove(entry)
+            continue
+        if late > 0:
+            entry["due"] = now + random.uniform(60, 180)
+        media_sent_in(entry["chat_id"])[it["name"]] = "pending"
+        schedule_later_media(entry, it)
+        print(f"[медиа] после перезапуска: {it['name']} для {entry['who']} уйдёт через "
+              f"{int((entry['due'] - now) // 60)} мин")
+    save_state()
 
 
 def media_history_label(chat_id: int, msg_id: int) -> str | None:
@@ -2670,7 +2699,7 @@ async def burn_ttl(chat_id: int) -> None:
         left = [m.id for m in await tg(client.get_messages(chat_id, ids=ids)) if m and is_ttl(m)]
         if left:
             print(f"[ttl] {chat_id}: ВНИМАНИЕ, после открытия файл ещё доступен: {left}", file=sys.stderr)
-            await notify(f"⚠️ одноразовые {left} не сгорели после открытия")
+            await notify(f"⚠️ одноразовые {left} не сгорели после открытия", important=True)
         else:
             print(f"[ttl] {chat_id}: {ids} сгорели (на сервере файла больше нет)")
     except Exception as exc:  # noqa: BLE001
@@ -2898,7 +2927,8 @@ async def sync_contact(chat_id: int, user: User, full: bool = False) -> dict:
                 data.update({"last_id": 0, "summarized_id": 0, "profile": "", "log": []})
                 arch = CONTACTS_DIR / "archive" / f"{user.id}.md"
                 if arch.exists():   # архив соберётся заново из той же переписки; старый не удаляем
-                    arch.replace(arch.with_suffix(".md.old"))
+                    # с датой в имени: повторный full не затирает архив предыдущего
+                    arch.replace(arch.with_name(f"{user.id}.{time.strftime('%Y%m%d-%H%M%S')}.md.old"))
         for m in reversed(msgs):
             if m.id <= data["last_id"]:
                 continue
@@ -2949,10 +2979,8 @@ SUMMARY_PROMPT = """Ты ведёшь личные заметки владель
 async def _memory_llm(msgs: list[dict], max_tokens: int = 700) -> str:
     if CFG["engine"] in ("openai", "llamacpp"):
         raw = await llm_thread(_openai_call, msgs, max_tokens)
-    elif CFG["engine"] == "ollama":
-        raw = await llm_thread(_ollama_call, msgs)
     else:
-        raw = await run_harness(msgs[0]["content"] + "\n\n" + msgs[1]["content"])
+        raw = await llm_thread(_ollama_call, msgs)
     return THINK_RE.sub("", raw).strip()
 
 
@@ -3103,14 +3131,148 @@ def schedule_summary(chat_id: int, user: User) -> None:
             _summary_tasks[chat_id] = asyncio.create_task(summarize_contact(chat_id, user))
 
 
+def chat_limit(chat_id: int, anon: bool = False) -> int:
+    lim = chat_cfg(chat_id).get("limit")
+    if lim is not None:
+        return int(lim)
+    return CFG["anon_max_per_hour"] if anon else CFG["max_per_hour"]
+
+
+def count_reply(chat_id: int) -> None:
+    """Один ответ — одна отметка, сколько бы сообщений он ни занял (лимит — в ответах, не в сообщениях)."""
+    sent_log.setdefault(chat_id, []).append(time.time())
+
+
 def rate_ok(chat_id: int, anon: bool = False) -> bool:
     now = time.time()
     log = [t for t in sent_log.get(chat_id, []) if now - t < 3600]
     sent_log[chat_id] = log
-    limit = CFG["anon_max_per_hour"] if anon else CFG["max_per_hour"]
+    limit = chat_limit(chat_id, anon)
     if limit <= 0:
         return True  # 0 = без лимита
     return len(log) < limit
+
+
+def rate_free_at(chat_id: int) -> float:
+    """Когда освободится место в лимите (самый старый ответ за час выйдет из окна)."""
+    log = sent_log.get(chat_id) or [time.time()]
+    return min(log) + 3600
+
+
+# ── настройки отдельного чата (команда set) ─────────────────────────────────
+CHAT_KEYS = {
+    "approve": "on|off — ответы этому человеку только после твоего подтверждения",
+    "delay": "мин-макс сек — пауза перед прочтением (например 5-30; 0 — без паузы)",
+    "limit": "N — лимит ответов в час (0 — без лимита)",
+    "media": "off | all | photo,video,voice,round — какие свои медиа бот может слать ему сам",
+    "tone": "текст — как писать именно ему («серьёзнее, без подколов»)",
+    "sleep": "on|off — соблюдать ли часы сна (SLEEP_HOURS) в этом чате",
+}
+_ON = {"on", "1", "да", "yes", "вкл", "true"}
+_OFF = {"off", "0", "нет", "no", "выкл", "false"}
+_KIND_ALIASES = {"фото": "photo", "видео": "video", "голосовые": "voice", "голосовое": "voice", "гс": "voice",
+                 "кружки": "round", "кружочки": "round", "кружок": "round"}
+
+
+def chat_cfg(chat_id: int) -> dict:
+    return state["chat_cfg"].get(str(chat_id), {})
+
+
+def parse_chat_value(key: str, raw: str) -> tuple[object, str]:
+    """Значение настройки чата из текста → (значение, ошибка)."""
+    v = raw.strip().lower()
+    if key in ("approve", "sleep"):
+        if v in _ON:
+            return True, ""
+        if v in _OFF:
+            return False, ""
+        return None, f"{key}: on или off"
+    if key == "delay":
+        m = re.fullmatch(r"(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?", v)
+        if not m:
+            return None, "delay: например 5-30 (секунд) или 0"
+        lo, hi = float(m.group(1)), float(m.group(2) or m.group(1))
+        return [min(lo, hi), max(lo, hi)], ""
+    if key == "limit":
+        return (int(v), "") if v.isdigit() else (None, "limit: целое число, 0 — без лимита")
+    if key == "media":
+        if v in _OFF:
+            return [], ""
+        if v in ("all", "все", "всё"):
+            return list(MEDIA_KINDS), ""
+        kinds = [_KIND_ALIASES.get(x, x) for x in re.split(r"[\s,]+", v) if x]
+        bad = [x for x in kinds if x not in MEDIA_KINDS]
+        if bad:
+            return None, f"media: не знаю {', '.join(bad)} — photo, video, voice, round, all или off"
+        return sorted(set(kinds)), ""
+    if key == "tone":
+        return (raw.strip(), "") if raw.strip() else (None, "tone: напиши, как с ним общаться")
+    return None, f"нет настройки «{key}» — {', '.join(CHAT_KEYS)}"
+
+
+def chat_value_text(key: str, val) -> str:
+    if key in ("approve", "sleep"):
+        return "on" if val else "off"
+    if key == "delay":
+        return "0" if not val[1] else f"{val[0]:g}-{val[1]:g} с"
+    if key == "media":
+        return ", ".join(val) if val else "off"
+    return str(val)
+
+
+def chat_read_delay(chat_id: int) -> tuple[float, float]:
+    d = chat_cfg(chat_id).get("delay")
+    return (float(d[0]), float(d[1])) if d else (CFG["read_min"], CFG["read_max"])
+
+
+def needs_approval(chat_id: int) -> bool:
+    v = chat_cfg(chat_id).get("approve")
+    if v is not None:
+        return bool(v)
+    return bool(state.get("approve_default", CFG["approve"]))
+
+
+# ── часы сна (SLEEP_HOURS) ─────────────────────────────────────────────────────
+def _parse_sleep(spec: str) -> tuple[int, int] | None:
+    """«1-9», «23:30-08:00» → (минута начала, минута конца) от полуночи; пусто/ошибка — None."""
+    m = re.fullmatch(r"\s*(\d{1,2})(?::(\d\d))?\s*-\s*(\d{1,2})(?::(\d\d))?\s*", spec or "")
+    if not m:
+        return None
+    a = int(m.group(1)) * 60 + int(m.group(2) or 0)
+    b = int(m.group(3)) * 60 + int(m.group(4) or 0)
+    if a >= 24 * 60 or b > 24 * 60 or a == b:
+        return None
+    return a, b % (24 * 60)
+
+
+SLEEP = _parse_sleep(CFG["sleep"])
+if CFG["sleep"] and not SLEEP:
+    print(f"[сон] SLEEP_HOURS={CFG['sleep']!r} не понял (нужно вроде 1-9 или 23:30-08:00) — сон выключен",
+          file=sys.stderr)
+
+
+def sleep_until(now: datetime | None = None) -> float | None:
+    """Сейчас «сплю»? → когда проснусь (epoch), иначе None. Время пробуждения — конец SLEEP_HOURS плюс
+    случайная задержка до SLEEP_WAKE_JITTER_MINUTES, одна и та же в пределах одной ночи."""
+    if not SLEEP:
+        return None
+    now = now or datetime.now()
+    a, b = SLEEP
+    for shift in (-1, 0, 1):
+        day = (now + timedelta(days=shift)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start = day + timedelta(minutes=a)
+        end = day + timedelta(minutes=b, days=1 if b <= a else 0)
+        jitter = random.Random(f"{ACCOUNT}:{end.date()}").uniform(0, max(0.0, CFG["sleep_jitter"]))
+        end += timedelta(minutes=jitter)
+        if start <= now < end:
+            return end.timestamp()
+    return None
+
+
+def chat_sleep_until(chat_id: int) -> float | None:
+    if chat_cfg(chat_id).get("sleep") is False:
+        return None
+    return sleep_until()
 
 
 _DASHES = re.compile(r"[—–―]")
@@ -3564,11 +3726,70 @@ async def send_human(chat_id: int, text: str, fast: bool = False, started: float
             await asyncio.sleep(typing)
         msg = await tg(client.send_message(chat_id, part))
         bot_sent(chat_id, msg)
-        sent_log.setdefault(chat_id, []).append(time.time())
         print(f"[{chat_id}] → {part[:120]}")
         if i < len(parts) - 1:
             await asyncio.sleep(random.uniform(0.3, 1.2))
     save_state()
+
+
+def remember_reply(chat_id: int, text: str) -> None:
+    """Запомнить отправленный ответ для анти-дубля (recent_replies / recent_parts)."""
+    if not text:
+        return
+    recent_replies.setdefault(chat_id, []).append(norm_reply(text))
+    recent_parts.setdefault(chat_id, []).extend(
+        norm_reply(p) for p in _PART_SPLIT.split(text) if norm_reply(p))
+    del recent_parts[chat_id][:-20]  # помним ~20 последних кусочков своих реплик
+    del recent_replies[chat_id][:-6]  # помним последние 6 своих реплик
+
+
+async def deliver_reply(chat_id: int, name: str, reply: str, file_actions: list, caption: str | None,
+                        anon: bool, now_media: bool, english: bool, started: float | None = None,
+                        raw: bool = False) -> bool:
+    """Отправить готовый ответ: текст «как человек» (печатает, опечатки) + файлы/медиа.
+    raw — текст написан тобой (edit черновика): без опечаток и без деления на сообщения.
+    Возвращает, ушло ли хоть что-то. Все сообщения ответа запоминаются для undo."""
+    _reply_group[chat_id] = []
+    sent = False
+    try:
+        if reply:
+            if raw:
+                text, correction = reply, None
+            else:
+                text, correction = add_typo(split_messages(reply))
+            await send_human(chat_id, text, fast=anon, started=started)
+            if correction:
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+                msg = await tg(client.send_message(chat_id, correction))
+                bot_sent(chat_id, msg)
+                save_state()  # иначе после перезапуска «*слово» выглядит как написанное тобой вручную
+            sent = True
+            remember_reply(chat_id, reply)
+            await notify(f"🤖 → {name}:\n{reply}")
+        if file_actions:
+            sent_files = await do_file_actions(chat_id, file_actions, name, anon, now=now_media, caption=caption)
+            if sent_files:
+                sent = True
+                if not reply and caption:
+                    remember_reply(chat_id, caption)
+            elif not reply:
+                # весь ответ был тегом файла, а файл не ушёл — без этого собеседник не получит вообще ничего
+                fallback = caption or random.choice(
+                    ["блин, щас не получается скинуть, давай позже", "ой, не отправляется что-то, потом скину"]
+                    if not english else ["ugh it won't send rn, later", "hm it's not sending, i'll send it later"])
+                print(f"[{name}] файл не ушёл, а текста не было — пишу «{fallback}»")
+                await send_human(chat_id, fallback, fast=anon)
+                remember_reply(chat_id, fallback)
+                await notify(f"🤖 → {name}:\n{fallback}")
+                sent = True
+    finally:
+        ids = _reply_group.pop(chat_id, [])
+        if ids:
+            state["last_reply"][str(chat_id)] = ids
+            save_state()
+    if sent:
+        count_reply(chat_id)
+    return sent
 
 
 ANON_NAME = "Собеседник (анонимный чат, незнакомец)"
@@ -3594,7 +3815,12 @@ async def respond(chat_id: int, user: User) -> None:
         return  # на всё уже ответили
     if manual_recent and not hint_text:
         if not anon:
-            print(f"[{name}] ты недавно писал сам — пропускаю")
+            # его сообщение после твоего иначе так и осталось бы без ответа, если ты ушёл:
+            # когда TAKEOVER_MINUTES истекут, проверим ещё раз (ответил сам — бот промолчит)
+            at = last_manual_ts + CFG["takeover_min"] * 60 + random.uniform(30, 120)
+            print(f"[{name}] ты недавно писал сам — пропускаю; проверю снова в "
+                  f"{time.strftime('%H:%M', time.localtime(at))}")
+            schedule_recheck(chat_id, user, at, "ты писал сам")
             return
         # В анонимном чате не теряем сообщение: выжидаем свою паузу и всё равно отвечаем.
         wait = CFG["anon_takeover_min"] * 60 - (time.time() - last_manual_ts)
@@ -3608,15 +3834,26 @@ async def respond(chat_id: int, user: User) -> None:
         if manual_recent:
             return  # ты всё ещё пишешь сам
     if not rate_ok(chat_id, anon):
-        limit = CFG["anon_max_per_hour"] if anon else CFG["max_per_hour"]
-        await notify(f"⏸ {name}: лимит {limit} ответов/час, жду тебя")
+        limit = chat_limit(chat_id, anon)
+        at = rate_free_at(chat_id) + random.uniform(30, 120)
+        print(f"[{name}] лимит {limit} ответов/час — отвечу в {time.strftime('%H:%M', time.localtime(at))}")
+        schedule_recheck(chat_id, user, at, "лимит ответов")
+        if time.time() - _limit_noted.get(chat_id, 0) > 3600:   # одно уведомление на окно лимита, а не на каждое сообщение
+            _limit_noted[chat_id] = time.time()
+            await notify(f"⏸ {name}: лимит {limit} ответов/час — отвечу сам в "
+                         f"{time.strftime('%H:%M', time.localtime(at))}, если не ответишь раньше", important=True)
         return
-    await tg(client.send_read_acknowledge(chat_id))
+    _limit_noted.pop(chat_id, None)
+    approval = needs_approval(chat_id)
+    if not approval:   # черновик ещё не одобрен — «прочитано» не ставим, пока ты не решишь
+        await tg(client.send_read_acknowledge(chat_id))
     asks_now = re.search(r"\b(?:что|чт[оё]|ч[еёо]|шо)\s+(?:(?:ты|щас|сейчас|там)\s+)*(?:делаешь|делаете|творишь)"
                          r"|чем\s+(?:(?:ты|щас|сейчас)\s+)*(?:занят|занимаешься\s+(?:щас|сейчас))"
                          r"|\bwyd\b|what(?:'re| are)? (?:you|u) (?:doing|up to)", last_text, re.I)
     pending = unanswered(history)
     MEDIA_LANG.set("en" if is_english(history) else "ru")   # медиа — только на языке собеседника
+    cm = chat_cfg(chat_id).get("media")
+    CHAT_MEDIA.set(set(cm) if cm is not None else None)     # set <кто> media … — свои виды для чата
     if not anon:
         await sync_contact(chat_id, user)
     known = bool(contact_profiles.get(name))
@@ -3625,8 +3862,11 @@ async def respond(chat_id: int, user: User) -> None:
                                 stale_note(history),
                                 # с твоим указанием «новый заход, старую тему не продолжай» только мешает
                                 ("" if hint_text else gap_note(history)) or repeat_note(history) or stall_note(history),
-                                media_status(chat_id) if MEDIA_SEND else "",
+                                media_status(chat_id) if media_send() else "",
                                 media_ask_note(chat_id, media_asked(history), history) if not hint_text else "") if x)
+    tone = chat_cfg(chat_id).get("tone")
+    if tone:
+        note += (" " if note else "") + f"Как писать именно ему (твоя постоянная установка): {tone}."
     if heart_due(history) == "ask":
         note += (" Он просит сердечко: оно уйдёт само отдельным сообщением сразу после твоего ответа, "
                  "так что ответь по-тёплому в пару слов («лови», «держи»), сам эмодзи не ставь, "
@@ -3648,7 +3888,7 @@ async def respond(chat_id: int, user: User) -> None:
                  "Тема - плавно переведи разговор на неё. Отправить медиа - поставь тег [медиа: имя] "
                  "из списка (подходящее по описанию) - можно, даже если он не просил. "
                  "Не упоминай, что тебя кто-то попросил.")
-        if not MEDIA_SEND and re.search(r"фот|видео|видос|голосов|гс|войс|кружо|кружк|скинь|отправь|покажи",
+        if not media_send() and re.search(r"фот|видео|видос|голосов|гс|войс|кружо|кружк|скинь|отправь|покажи",
                                         hint_text, re.I):
             note += " " + media_note(set(MEDIA_KINDS)).replace("\n", " ")  # отправка выключена, но ты сам просишь
         if proactive or not last_turn:
@@ -3685,9 +3925,9 @@ async def respond(chat_id: int, user: User) -> None:
     if preset is not None:
         reply = preset
     else:
-        async with client.action(chat_id, "typing"):
-            reply = pull(await run_harness(build_task(name, history, first_extra, note),
-                                           build_messages(name, history, first_extra, note)))
+        # с подтверждением «печатает» не показываем: ответ может вообще не уйти
+        async with (contextlib.nullcontext() if approval else client.action(chat_id, "typing")):
+            reply = pull(await run_model(build_messages(name, history, first_extra, note)))
     if state["paused"] or chat_id in manual_during:  # you jumped in meanwhile
         return
     if anon and not state.get("anon_active"):
@@ -3702,9 +3942,7 @@ async def respond(chat_id: int, user: User) -> None:
         extra = ("Молчать нельзя. Даже если сообщение тупое, короткое, стикер или бред - "
                  "ответь коротко, по-человечески, обычным текстом: отреагируй, подколи "
                  "или переспроси. Не пиши [skip] и никаких служебных пометок.")
-        reply = pull(await run_harness(
-            build_task(name, history, extra, note), build_messages(name, history, extra, note)
-        ))
+        reply = pull(await run_model(build_messages(name, history, extra, note)))
         if state["paused"] or chat_id in manual_during:
             return
         if anon and not state.get("anon_active"):
@@ -3712,7 +3950,7 @@ async def respond(chat_id: int, user: User) -> None:
         tag = service_tag(reply)
     if tag == "escalate":
         reason = reply.split("]", 1)[1].strip() if "]" in reply else ""
-        await notify(f"🙋 {name} ждёт тебя лично: {reason or 'без причины'}\n→ tg://user?id={user.id}")
+        await notify(f"🙋 {name} ждёт тебя лично: {reason or 'без причины'}\n→ tg://user?id={user.id}", important=True)
         return
     reply = humanize(reply)
     reply = clamp_length(reply)
@@ -3745,8 +3983,7 @@ async def respond(chat_id: int, user: User) -> None:
     if problem:
         kind, extra = problem
         print(f"[{name}] ответ звучит как бот ({kind}): «{reply}» — переписываю")
-        reply2 = humanize(pull(await run_harness(build_task(name, history, extra, note),
-                                                 build_messages(name, history, extra, note))))
+        reply2 = humanize(pull(await run_model(build_messages(name, history, extra, note))))
         if state["paused"] or chat_id in manual_during:
             return
         has_media = any(a[0] == "media" for a in file_actions)
@@ -3769,9 +4006,7 @@ async def respond(chat_id: int, user: User) -> None:
         extra = (f"Ты уже спрашивал похожее раньше («{dup_q}»), ответ есть в переписке. "
                  "Ответь иначе: отреагируй на его последнее сообщение и, если хочешь, "
                  "спроси что-то НОВОЕ, чего ещё не спрашивал.")
-        reply2 = humanize(pull(await run_harness(
-            build_task(name, history, extra, note), build_messages(name, history, extra, note)
-        )))
+        reply2 = humanize(pull(await run_model(build_messages(name, history, extra, note))))
         if state["paused"] or chat_id in manual_during:
             return
         if reply2 and not repeats_question(reply2, asked_questions(history)):
@@ -3790,9 +4025,7 @@ async def respond(chat_id: int, user: User) -> None:
         print(f"[{name}] дубль — переспрашиваю")
         extra = ("Ты уже писал это сообщение. Скажи иначе, другими словами, коротко. "
                  "Без повторов и без служебных пометок.")
-        reply2 = humanize(pull(await run_harness(
-            build_task(name, history, extra, note), build_messages(name, history, extra, note)
-        )))
+        reply2 = humanize(pull(await run_model(build_messages(name, history, extra, note))))
         if state["paused"] or chat_id in manual_during:
             return
         if not reply2 or norm_reply(reply2) in prev:
@@ -3844,12 +4077,6 @@ async def respond(chat_id: int, user: User) -> None:
         return  # worker увидит новое сообщение и сгенерирует ответ на всю пачку
     if state["paused"] or chat_id in manual_during or (anon and not state.get("anon_active")):
         return
-    if reply:
-        recent_replies.setdefault(chat_id, []).append(norm_reply(reply))
-        recent_parts.setdefault(chat_id, []).extend(
-            norm_reply(p) for p in _PART_SPLIT.split(reply) if norm_reply(p))
-        del recent_parts[chat_id][:-20]  # помним ~20 последних кусочков своих реплик
-        del recent_replies[chat_id][:-6]  # помним последние 6 своих реплик
     if any(a[0] == "media" for a in file_actions):
         asked = media_asked(history) if not MEDIA_SELF and not hint_text else set()
         keep, why_drop = [], ""
@@ -3881,7 +4108,7 @@ async def respond(chat_id: int, user: User) -> None:
             # модель перепутала вид (видео вместо фото) — переспрашиваем, показав только подходящие файлы
             fix = (media_ask_note(chat_id, asked, history) + " В прошлый раз ты поставил тег файла не того вида - "
                    "так нельзя.")
-            raw2 = await run_harness(build_task(name, history, fix, note), build_messages(name, history, fix, note))
+            raw2 = await run_model(build_messages(name, history, fix, note))
             if state["paused"] or chat_id in manual_during:
                 return
             text2, acts2 = extract_file_actions(raw2)
@@ -3907,8 +4134,7 @@ async def respond(chat_id: int, user: User) -> None:
                            "коротко, что щас, чуть позже скинешь.",
             }.get(why_drop, "Сейчас ничего не отправляй: ни фото, ни видео, ни голосовое - и не пиши, что "
                             "отправляешь или скинешь. Просто ответь на его сообщение обычным текстом.")
-            redo = pull(await run_harness(build_task(name, history, extra, note),
-                                          build_messages(name, history, extra, note)))
+            redo = pull(await run_model(build_messages(name, history, extra, note)))
             if state["paused"] or chat_id in manual_during:
                 return
             redo = humanize(redo)
@@ -3942,30 +4168,24 @@ async def respond(chat_id: int, user: User) -> None:
         caption = cap if len(cap) >= 3 else None
         print(f"[{name}] текст «{reply}» → {'подпись «' + caption + '»' if caption else 'без подписи'}")
         reply = ""
-    if reply:
-        typoed, correction = add_typo(split_messages(reply))
-        await send_human(chat_id, typoed, fast=anon, started=t0)
-        if correction:
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-            msg = await tg(client.send_message(chat_id, correction))
-            bot_sent(chat_id, msg)
-            save_state()  # иначе после перезапуска «*слово» выглядит как написанное тобой вручную
-        await notify(f"🤖 → {name}:\n{reply}")
+    if not reply and not file_actions:
+        return
+    if approval:
+        # не отправляем: черновик тебе на подтверждение (ok / edit / no / redo)
+        await make_draft(chat_id, user, name, reply, file_actions, caption, bool(hint_text), anon,
+                         is_english(history), hint_text)
+        if hint and owner_hints.get(chat_id) == hint:
+            owner_hints.pop(chat_id, None)   # указание учтено в черновике
+        elif hint and auto_hints.get(chat_id) == hint:
+            auto_hints.pop(chat_id, None)
+        return
+    await deliver_reply(chat_id, name, reply, file_actions, caption, anon, bool(hint_text),
+                        is_english(history), started=t0)
     if hint and owner_hints.get(chat_id) == hint:
         owner_hints.pop(chat_id, None)  # указание выполнено
         await notify(f"✅ {name}: указание выполнено")
     elif hint and auto_hints.get(chat_id) == hint:
         auto_hints.pop(chat_id, None)
-    if file_actions:
-        sent_files = await do_file_actions(chat_id, file_actions, name, anon, now=bool(hint_text), caption=caption)
-        if not sent_files and not reply:
-            # весь ответ был тегом файла, а файл не ушёл — без этого собеседник не получит вообще ничего
-            fallback = caption or random.choice(
-                ["блин, щас не получается скинуть, давай позже", "ой, не отправляется что-то, потом скину"]
-                if not is_english(history) else ["ugh it won't send rn, later", "hm it's not sending, i'll send it later"])
-            print(f"[{name}] файл не ушёл, а текста не было — пишу «{fallback}»")
-            await send_human(chat_id, fallback, fast=anon)
-            await notify(f"🤖 → {name}:\n{fallback}")
     await burn_ttl(chat_id)
     if not anon:
         await sync_contact(chat_id, user)
@@ -3980,9 +4200,20 @@ async def worker(chat_id: int, user: User) -> None:
         while True:
             started = time.time()
             anon = is_anon_bot(user)
+            until = None if owner_hint(chat_id) else chat_sleep_until(chat_id)
+            if until:
+                if anon:
+                    return  # анонимка ночью: не отвечаем, новых собеседников не ищем
+                print(f"[{display_name(user)}] сплю до {time.strftime('%H:%M', time.localtime(until))} — отвечу после")
+                # кусками: твой tell среди ночи будит сразу, а не утром
+                while time.time() < until and not owner_hint(chat_id) and not state["paused"]:
+                    await asyncio.sleep(min(30.0, max(0.5, until - time.time())))
+                if state["paused"]:
+                    return
+            lo, hi = chat_read_delay(chat_id)
             # без искусственной паузы на «прочтение»: модель и так думает долго
-            if not anon and CFG["read_max"] > 0 and not owner_hint(chat_id):
-                await asyncio.sleep(random.uniform(CFG["read_min"], CFG["read_max"]))
+            if not anon and hi > 0 and not owner_hint(chat_id):
+                await asyncio.sleep(random.uniform(lo, hi))
             # wait until the person has stopped sending a burst of messages
             quiet = 2 if anon else CFG["quiet"]
             deadline = time.time() + 90  # если «печатает» висит вечно — не ждём бесконечно
@@ -4005,7 +4236,7 @@ async def worker(chat_id: int, user: User) -> None:
                     await burn_ttl(chat_id)  # одноразовые, которые модель посмотрела, — сгорают
             except Exception as exc:  # noqa: BLE001
                 print(f"[{chat_id}] error: {exc}", file=sys.stderr)
-                await notify(f"⚠️ не смог ответить {display_name(user)}: {exc}")
+                await notify(f"⚠️ не смог ответить {display_name(user)}: {exc}", important=True)
                 return
             h = owner_hint(chat_id)
             if last_incoming.get(chat_id, 0) <= started and not (h and h[1] > started):
@@ -4013,6 +4244,29 @@ async def worker(chat_id: int, user: User) -> None:
     finally:
         if workers.get(chat_id) is asyncio.current_task():
             workers.pop(chat_id, None)
+
+
+_recheck: dict[int, asyncio.Task] = {}   # chat_id → отложенная перепроверка «не остался ли он без ответа»
+_limit_noted: dict[int, float] = {}      # chat_id → когда уведомили о лимите (одно уведомление на окно)
+
+
+def schedule_recheck(chat_id: int, user: User, at: float, why: str) -> None:
+    """В момент at ещё раз запустить ответ в чате. Нужно, когда бот пропустил сообщение не насовсем
+    (ты писал сам, лимит в час): без этого оно оставалось без ответа, пока человек не напишет снова.
+    Если к тому времени ответили (ты или бот), respond увидит, что последнее слово за нами, и промолчит."""
+    old = _recheck.get(chat_id)
+    if old and not old.done():
+        old.cancel()
+
+    async def run() -> None:
+        await asyncio.sleep(max(1.0, at - time.time()))
+        _recheck.pop(chat_id, None)
+        if state["paused"] or str(chat_id) in state["muted"]:
+            return
+        print(f"[{display_name(user)}] {why}: время вышло — проверяю, не остался ли он без ответа")
+        kick_worker(chat_id, user)
+
+    _recheck[chat_id] = spawn(run())
 
 
 _stuck_retry: dict[int, float] = {}   # chat_id → last_incoming, на котором ответ уже перезапускали
@@ -4056,7 +4310,7 @@ async def watchdog() -> None:
                 _stuck_retry[chat_id] = mark  # одна повторная попытка на одну пачку сообщений
                 workers[chat_id] = spawn(worker(chat_id, user))
             elif user and not state["paused"]:
-                await notify(f"⚠️ {chat_id}: ответ завис дважды — больше не пробую, ответь сам")
+                await notify(f"⚠️ {display_name(user)}: ответ завис дважды — больше не пробую, ответь сам", important=True)
 
 
 _searching = False
@@ -4083,7 +4337,7 @@ async def anon_idle_watch() -> None:
         chat_id = ANON_CHAT_ID
         if idle <= 0 or chat_id is None or not CFG["anon_bot"]:
             continue
-        if state["paused"] or not state.get("anon_active") or chat_id in workers:
+        if state["paused"] or not state.get("anon_active") or chat_id in workers or sleep_until():
             continue
         now = time.time()
         if now - anon_ts["manual"] < max(idle, CFG["anon_takeover_min"] * 60):
@@ -4129,6 +4383,9 @@ async def auto_search(chat_id: int) -> None:
     try:
         await asyncio.sleep(random.uniform(3, 8))
         if state["paused"] or state.get("anon_active"):
+            return
+        if sleep_until():
+            print("[anon] сейчас часы сна — следующего собеседника поищу утром")
             return
         msg = await tg(client.send_message(chat_id, "/search"))
         bot_sent(chat_id, msg)
@@ -4208,6 +4465,9 @@ async def on_call(update):
         return
     if not isinstance(user, User) or not allowed(user):
         return  # чужие звонки — как обычно, звонит твой телефон
+    if chat_sleep_until(user.id):
+        print(f"[call] {display_name(user)} звонит в часы сна — не трогаю (спящий не сбрасывает)")
+        return
     name = display_name(user)
     kind = "видеозвонок" if call.video else "звонок"
     wait = random.uniform(CFG["call_min"], max(CFG["call_min"], CFG["call_max"]))
@@ -4220,7 +4480,7 @@ async def on_call(update):
                 peer=InputPhoneCall(id=call.id, access_hash=call.access_hash),
                 duration=0, reason=PhoneCallDiscardReasonBusy(), connection_id=0, video=call.video)))
             print(f"[call] {kind} от {name} сброшен")
-            await notify(f"📵 {name}: {kind} сброшен")
+            await notify(f"📵 {name}: {kind} сброшен", important=True)
             if CFG["calls"] == "decline_text":
                 auto_hints[user.id] = (f"Он только что звонил, ты сбросил{_a()} звонок. Ответь так, будто сейчас "
                                        "не можешь говорить: коротко, по-человечески, можно предложить написать.",
@@ -4252,6 +4512,7 @@ async def on_outgoing(event):
         if is_anon:
             anon_touch("manual")
         manual_during.add(chat_id)
+        await drop_chat_drafts(chat_id, "ты написал сам")
         if not (ANON_CHAT_ID is not None and chat_id == ANON_CHAT_ID):
             schedule_contact_sync(chat_id)
 
@@ -4348,6 +4609,233 @@ async def sync_all_contacts(max_age_hours: float = 72) -> None:
         print(f"[memory] после запуска дописал историю в {n} чат(ов)")
 
 
+# ── черновики на подтверждение (APPROVE=1, approve <кто> on, set <кто> approve on) ────
+# Ответ не уходит сам: карточка черновика приходит в «Избранное» (и в открытые ub). Решаешь ты:
+# ok — отправить как есть, edit <текст> — отправить свой текст, no — не отправлять, redo — переписать.
+# С телефона проще всего ответить (reply) на карточку: «+», «-», «redo …» или сразу свой текст.
+# Черновики лежат в state.json и переживают перезапуск.
+_DRAFT_OK = {"+", "ok", "ок", "да", "го", "отправь", "отправить", "👍", "yes", "y"}
+_DRAFT_FORCE = {"ok!", "ок!", "+!"}
+_DRAFT_NO = {"-", "no", "нет", "не надо", "отмена", "не отправляй", "cancel", "👎", "n"}
+
+
+def find_draft(no: int | None = None, chat_id: int | None = None) -> dict | None:
+    ds = state["drafts"]
+    if no is not None:
+        return next((d for d in ds if d["no"] == no), None)
+    if chat_id is not None:
+        d = next((d for d in reversed(ds) if d["chat_id"] == chat_id), None)
+        if d:
+            return d
+    return ds[-1] if ds else None
+
+
+def draft_card(d: dict) -> str:
+    no = d["no"]
+    head = f"✋ черновик #{no} → {d['who']}" + (f"\n(по твоему указанию: «{d['hint']}»)" if d.get("hint") else "")
+    parts = [head]
+    if d["reply"]:
+        parts.append(d["reply"])
+    for a in d["acts"]:
+        if a[0] == "media":
+            parts.append(f"+ медиа: {a[1]}" + (f", текст к нему: «{d['caption']}»" if d.get("caption") else ""))
+        else:
+            parts.append(f"+ {'файл' if a[0] == 'send' else 'создать файл'}: {a[1]}")
+    parts.append("Ответь на это сообщение: «+» — отправить, «-» — не отправлять, «redo [что иначе]» — "
+                 "переписать, любой другой текст — отправить его вместо черновика.\n"
+                 f"Или командой: ok {no} · no {no} · edit {no} <текст> · redo {no} [указание]")
+    return "\n\n".join(parts)
+
+
+def draft_short(d: dict) -> str:
+    text = d["reply"] or d.get("caption") or ""
+    media = [a[1] for a in d["acts"]]
+    age = int((time.time() - d["created"]) // 60)
+    return (f"#{d['no']} → {d['who']} ({age} мин назад): «{' '.join(text.split())[:120]}»"
+            + (f" + {', '.join(media)}" if media else ""))
+
+
+async def make_draft(chat_id: int, user: User, name: str, reply: str, acts: list, caption: str | None,
+                     now_media: bool, anon: bool, english: bool, hint_text: str) -> None:
+    for old in [d for d in state["drafts"] if d["chat_id"] == chat_id]:
+        await close_draft(old, f"заменён новым #{state.get('draft_seq', 0) + 1}")
+    state["draft_seq"] = state.get("draft_seq", 0) + 1
+    d = {"no": state["draft_seq"], "chat_id": chat_id, "who": who_name(user), "name": name,
+         "reply": reply, "acts": [list(a) for a in acts], "caption": caption, "now_media": now_media,
+         "anon": anon, "anon_partner": state.get("anon_partner") if anon else None, "english": english,
+         "hint": hint_text, "created": time.time(), "card": None}
+    try:  # всегда в «Избранное», даже при NOTIFY=off: без карточки черновик не одобрить с телефона
+        d["card"] = (await tg(client.send_message("me", draft_card(d)[:4000]))).id
+    except Exception as exc:  # noqa: BLE001
+        print(f"[approve] не смог прислать черновик в «Избранное»: {exc}", file=sys.stderr)
+    state["drafts"].append(d)
+    save_state()
+    print(f"[{name}] черновик #{d['no']} ждёт подтверждения: «{reply or caption or ''}»"
+          + (f" + {', '.join(a[1] for a in acts)}" if acts else ""))
+    for conn in CONTROL_CONNS:
+        _conn_send(conn, {"type": "msg", "kind": "sys",
+                          "text": f"✋ черновик {draft_short(d)}\n   ok {d['no']} · edit {d['no']} <текст> · "
+                                  f"no {d['no']} · redo {d['no']} [указание]"})
+
+
+async def close_draft(d: dict, status: str) -> None:
+    """Убрать черновик из очереди и дописать в его карточку, чем всё кончилось."""
+    if d in state["drafts"]:
+        state["drafts"].remove(d)
+        save_state()
+    if d.get("card"):
+        try:
+            await tg(client.edit_message("me", d["card"], (draft_card(d).rsplit("\n\n", 1)[0]
+                                                           + f"\n\n— {status}")[:4000]))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[approve] карточку #{d['no']} не обновил: {exc}", file=sys.stderr)
+
+
+async def drop_chat_drafts(chat_id: int, why: str) -> None:
+    for d in [d for d in state["drafts"] if d["chat_id"] == chat_id]:
+        print(f"[approve] черновик #{d['no']} для {d['who']} отменён: {why}")
+        await close_draft(d, f"отменён: {why}")
+
+
+async def send_draft(d: dict, text: str | None = None, force: bool = False) -> str:
+    """ok / edit: отправить черновик (или твой текст вместо него) — «как человек», с «печатает»."""
+    if d["anon"] and (not state.get("anon_active") or state.get("anon_partner") != d["anon_partner"]):
+        await close_draft(d, "отменён: собеседник в анонимке уже сменился")
+        return f"#{d['no']}: собеседник в анонимке уже сменился — черновик удалён"
+    if text is None and not force and last_incoming.get(d["chat_id"], 0) > d["created"]:
+        return (f"#{d['no']}: после черновика {d['who']} написал ещё — бот уже готовит новый. "
+                f"Отправить этот всё равно: ok! {d['no']}")
+    await close_draft(d, "отправлен" if text is None else "вместо него отправлен твой текст")
+    spawn(_send_draft(d, text))
+    return f"📤 #{d['no']} → {d['who']}: отправляю" + (" твой текст" if text is not None else "")
+
+
+async def _send_draft(d: dict, text: str | None) -> None:
+    chat_id = d["chat_id"]
+    reply, caption = d["reply"], d.get("caption")
+    acts = [tuple(a) for a in d["acts"]]
+    if text is not None:
+        if reply or not any(a[0] == "media" for a in acts):
+            reply = text
+        else:
+            caption = text   # черновик был «медиа + подпись» — правишь подпись
+    try:
+        await tg(client.send_read_acknowledge(chat_id))
+        await deliver_reply(chat_id, d["name"], reply, acts, caption, d["anon"], d["now_media"],
+                            d["english"], raw=text is not None)
+        if not d["anon"]:
+            schedule_contact_sync(chat_id, delay=2)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[approve] черновик #{d['no']} не ушёл: {exc}", file=sys.stderr)
+        await notify(f"⚠️ черновик #{d['no']} для {d['who']} не ушёл: {exc}", important=True)
+
+
+async def redo_draft(d: dict, wish: str = "") -> str:
+    """Переписать черновик: твоё пожелание (или «скажи иначе») становится указанием, как у tell."""
+    await close_draft(d, "переписываю" + (f": {wish}" if wish else ""))
+    try:
+        user = await tg(client.get_entity(d["chat_id"]))
+    except Exception as exc:  # noqa: BLE001
+        return f"#{d['no']}: не нашёл собеседника ({exc})"
+    old = d["reply"] or d.get("caption") or ""
+    owner_hints[d["chat_id"]] = (wish or f"ответь ему иначе, другими словами, не так, как собирался: «{old}»",
+                                 time.time())
+    kick_worker(d["chat_id"], user)
+    return f"🔁 #{d['no']} → {d['who']}: переписываю, новый черновик придёт сюда же"
+
+
+async def draft_command(cmd: str, args: list[str], current: User | None) -> str:
+    """drafts / ok / ok! / no / edit / redo — из ub и «Избранного»."""
+    if cmd == "drafts":
+        return ("черновики, ждущие тебя:\n" + "\n".join(draft_short(d) for d in state["drafts"])
+                if state["drafts"] else "черновиков нет")
+    no = int(args.pop(0).lstrip("#")) if args and args[0].lstrip("#").isdigit() else None
+    d = find_draft(no, current.id if current else None)
+    if not d:
+        return f"нет черновика #{no}" if no else "черновиков нет"
+    rest = " ".join(args).strip()
+    if cmd in ("ok", "ok!"):
+        return await send_draft(d, force=cmd == "ok!")
+    if cmd == "no":
+        await close_draft(d, "отменён тобой")
+        return f"🗑 #{d['no']} → {d['who']}: не отправляю"
+    if cmd == "edit":
+        if not rest:
+            return f"edit {d['no']} <текст> — какой текст отправить вместо черновика?"
+        return await send_draft(d, text=rest)
+    if cmd == "redo":
+        return await redo_draft(d, rest)
+    return "?"
+
+
+async def draft_by_reply(d: dict, text: str) -> str:
+    """Ты ответил (reply) на карточку черновика в «Избранном»."""
+    low = text.strip().lower()
+    if low in _DRAFT_OK:
+        return await send_draft(d)
+    if low in _DRAFT_FORCE:
+        return await send_draft(d, force=True)
+    if low in _DRAFT_NO:
+        await close_draft(d, "отменён тобой")
+        return f"🗑 #{d['no']}: не отправляю"
+    m = re.match(r"(?:redo|заново|переделай|перепиши)\b[\s,:-]*(.*)", text.strip(), re.I | re.S)
+    if m:
+        return await redo_draft(d, m.group(1).strip())
+    return await send_draft(d, text=text.strip())
+
+
+# ── undo: удалить последний ответ бота ──────────────────────────────────────
+def forget_bot_msgs(chat_id: int, ids: list[int]) -> None:
+    gone = set(ids)
+    cid = str(chat_id)
+    state["bot_ids"][cid] = [x for x in state["bot_ids"].get(cid, []) if x not in gone]
+    if set(state["last_reply"].get(cid, [])) & gone:
+        state["last_reply"].pop(cid, None)
+    sent = media_sent_in(chat_id)
+    for name, st in list(sent.items()):
+        if st.startswith("sent:") and int(st.split(":", 1)[1]) in gone:
+            sent.pop(name, None)   # медиа удалено — его можно будет отправить снова
+    for k in [k for k in state.get("media_msgs", {}) if k.startswith(f"{chat_id}:")
+              and int(k.split(":", 1)[1]) in gone]:
+        state["media_msgs"].pop(k, None)
+    save_state()
+
+
+# ── прочее для команд ───────────────────────────────────────────────────────
+async def name_of(uid: int | str) -> str:
+    """Имя человека по id для status (из кэша сессии; не нашёлся — сам id)."""
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return str(uid)
+    u = worker_users.get(uid) or next((x for x in _last_chats if x.id == uid), None)
+    if u is None:
+        try:
+            u = await tg(client.get_entity(uid), 10)
+        except Exception:  # noqa: BLE001
+            return str(uid)
+    return who_name(u) if isinstance(u, User) else str(uid)
+
+
+async def allow_overview() -> str:
+    env = ", ".join(sorted(CFG["allow"])) or "—"
+    added = ", ".join(state["allow_add"].values()) or "—"
+    removed = ", ".join(state["allow_del"].values()) or "—"
+    return (f"белый список:\n  из .env (ALLOW_USERS): {env}\n  добавлены командой allow: {added}\n"
+            f"  убраны командой deny: {removed}\n  не-контакты (ALLOW_NON_CONTACTS): "
+            f"{'да' if CFG['allow_non_contacts'] else 'нет'}\n"
+            "allow <кто> — отвечать ему, deny <кто> — не отвечать (без перезапуска, главнее .env)")
+
+
+def sleep_text() -> str:
+    if not SLEEP:
+        return "выключен" + (f" (SLEEP_HOURS={CFG['sleep']!r} не понял)" if CFG["sleep"] else "")
+    a, b = SLEEP
+    span = f"{a // 60:02d}:{a % 60:02d}–{b // 60:02d}:{b % 60:02d}"
+    until = sleep_until()
+    return span + (f", сейчас сплю до {time.strftime('%H:%M', time.localtime(until))}" if until else "")
+
+
 # ── команды: общие для ./ub и «Избранного» (.ub ...) ────────────────────
 # (команда, аргументы, описание, только в ub)
 COMMANDS = [
@@ -4365,6 +4853,16 @@ COMMANDS = [
     ("write", "[кто] <текст>", "написать сообщение от себя (бот уступит тебе на TAKEOVER_MINUTES)", False),
     ("send", "[кто] <файл>", "сразу отправить медиа из media/ без модели", False),
     ("media", "", "список медиа с описаниями", False),
+    ("undo", "[кто] [n]", "удалить у обоих последний ответ бота (или n последних его сообщений)", False),
+    ("drafts", "", "черновики, ждущие подтверждения", False),
+    ("ok", "[N]", "отправить черновик N (без N — последний / открытого чата); ok! — даже если он дописал", False),
+    ("edit", "[N] <текст>", "отправить свой текст вместо черновика", False),
+    ("no", "[N]", "не отправлять черновик", False),
+    ("redo", "[N] [указание]", "переписать черновик (можно сказать, что иначе)", False),
+    ("approve", "[кто] [on|off]", "ответы только после твоего подтверждения: чату или всем (без <кто>)", False),
+    ("set", "[кто] [ключ значение]", "настройки чата: approve, delay, limit, media, tone, sleep", False),
+    ("allow", "[кто]", "отвечать человеку (без перезапуска); без <кто> — белый список", False),
+    ("deny", "[кто]", "не отвечать человеку, даже если он в ALLOW_USERS", False),
     ("restart", "[cancel]", "перезапустить бота, когда закончит думать; все аккаунты — restart all", False),
     ("pause", "", "поставить все автоответы на паузу", False),
     ("resume", "", "снять с паузы", False),
@@ -4372,8 +4870,35 @@ COMMANDS = [
     ("unmute", "[кто]", "снова отвечать", False),
 ]
 HELP_DETAILS = {
-    "кто": "<кто> — @username, числовой id, номер из списка chats или anon (анонимный чат). "
-           "Если чат открыт (open), <кто> можно не писать — берётся открытый.",
+    "кто": "<кто> — @username, числовой id, номер из списка chats, имя или ник без @ из твоих чатов "
+           "(как в open), или anon (анонимный чат). Если чат открыт (open), <кто> можно не писать — "
+           "берётся открытый.",
+    "undo": "Удаляет у обоих сообщения, которые отправил бот (не твои).\n"
+            "  undo            последний ответ бота целиком (все его сообщения, опечатку, медиа)\n"
+            "  undo 3          три последних сообщения бота в открытом чате\n"
+            "  undo @masha 2   то же для другого чата\n"
+            "Его сообщение после этого снова «без ответа»: бот ответит, когда он напишет ещё, "
+            "или сразу — tell <как ответить>.",
+    "approve": "Ответы не уходят сами: черновик приходит в «Избранное» (и сюда, в ub), решаешь ты.\n"
+               "  approve on / off          всем чатам (без открытого чата; по умолчанию — APPROVE в .env)\n"
+               "  approve @masha on / off   одному чату, главнее общего (в открытом чате — без @masha);\n"
+               "                            approve @masha - — как у всех\n"
+               "  approve                   показать, где включено\n"
+               "Дальше: drafts — список; ok [N] — отправить; edit [N] <текст> — отправить свой текст; "
+               "no [N] — не отправлять; redo [N] [что иначе] — переписать.\n"
+               "С телефона: ответь (reply) на карточку черновика в «Избранном» — «+», «-», «redo …» "
+               "или сразу свой текст. Пока черновик ждёт, у собеседника нет ни «прочитано», ни «печатает». "
+               "Если он дописал после черновика, бот готовит новый (старый заменяется), а ok старого "
+               "попросит подтвердить: ok! N. Ты написал в чат сам — черновик отменяется.",
+    "set": "Настройки одного чата, главнее .env. Хранятся в state.json, перезапуск не нужен.\n"
+           + "\n".join(f"  {k:<8} {v}" for k, v in CHAT_KEYS.items()) + "\n"
+           "Примеры: set @masha delay 5-20 · set limit 5 (в открытом чате) · set @masha media photo,voice · "
+           "set @masha tone серьёзнее, без подколов · set @boss sleep off\n"
+           "set <кто> — показать; set <кто> <ключ> - — вернуть как в .env.",
+    "allow": "allow @masha — бот отвечает ей, даже если её нет в ALLOW_USERS (и снимает mute).\n"
+             "deny @masha — не отвечает, даже если она в ALLOW_USERS или ALLOW_NON_CONTACTS=1.\n"
+             "Без перезапуска, хранится в state.json. allow без <кто> — весь белый список.\n"
+             "В режиме анонимного чата (ANON_BOT) белый список не используется.",
     "tell": "Пример: tell @masha переведи разговор на концерт в субботу\n"
             "Собеседник указание не видит. Если он молчит — бот напишет сам и сразу. Если бот как раз "
             "думает — ответ переделается с указанием. Новое указание заменяет старое, невыполненное "
@@ -4408,6 +4933,9 @@ HELP_DETAILS = {
     "open": "Пример: open @masha   open masha   open Маша Иванова   cd 3   (номер из ls)\nПосле open команды tell/write/send/... "
             "можно писать без <кто>, а в чате видно: ← он, → бот, ✎ ты сам.",
 }
+for _c in ("drafts", "ok", "edit", "no", "redo"):
+    HELP_DETAILS[_c] = HELP_DETAILS["approve"]
+HELP_DETAILS["deny"] = HELP_DETAILS["allow"]
 _last_chats: list[User] = []   # номера для «open 3»
 
 
@@ -4493,13 +5021,35 @@ async def resolve_chat_ex(arg: str) -> tuple[User | None, str]:
     return None, err
 
 
-async def _target(args: list[str], current: User | None, need_rest: bool) -> tuple[User | None, str, str]:
-    """Разобрать «[кто] остальное». → (пользователь, остальной текст, ошибка)."""
+_NO_TARGET = "кому? укажи @username / id / имя из своих чатов / номер из chats, или сначала open"
+
+
+async def _target(args: list[str], current: User | None, need_rest: bool,
+                  name_only: bool = False) -> tuple[User | None, str, str]:
+    """Разобрать «[кто] остальное». → (пользователь, остальной текст, ошибка).
+
+    <кто> — @ник, id, номер из chats, anon, а ещё имя или ник без @ среди твоих чатов, как в open
+    («tell masha привет», «mute Маша Иванова»). Имя ищем только в своих чатах, не глобально: иначе
+    «tell hello …» нашло бы чужого @hello. name_only — все аргументы и есть <кто> (mute, info, undo…):
+    тогда в открытом чате «mute petya» заглушит Петю, а не открытый чат."""
     if args and _looks_like_target(args[0]) and (len(args) > 1 or not need_rest or current is None):
         user = await resolve_chat(args[0])
         return user, " ".join(args[1:]), "" if user else f"не нашёл {args[0]}"
+    if args and (name_only or current is None):
+        # имя может быть из двух слов («Маша Иванова привет») — пробуем длинное, потом короткое
+        spans = [len(args)] if name_only else \
+            [k for k in (2, 1) if k < len(args) or (k == len(args) and not need_rest)]
+        for k in spans:
+            user, err = await find_by_name(" ".join(args[:k]))
+            if user:
+                return user, " ".join(args[k:]), ""
+            if "несколько" in err:
+                return None, "", err
+        if name_only or not need_rest:
+            return None, "", f"не нашёл «{' '.join(args)}» среди своих чатов — @ник, id или номер из chats"
+        return None, "", _NO_TARGET
     if current is None:
-        return None, "", "кому? укажи @username / id / номер из chats, или сначала open"
+        return None, "", _NO_TARGET
     return current, " ".join(args), ""
 
 
@@ -4554,7 +5104,7 @@ async def send_media_now(chat_id: int, user: User, it: dict) -> None:
         await _deliver_media(chat_id, it, name, state.get("anon_partner") if anon else None, force=True)
     except Exception as exc:  # noqa: BLE001
         media_sent_in(chat_id).pop(it["name"], None)
-        await notify(f"⚠️ не смог отправить {it['name']}: {exc}")
+        await notify(f"⚠️ не смог отправить {it['name']}: {exc}", important=True)
 
 
 async def run_command(line: str, current: User | None = None, console: bool = False) -> str:
@@ -4575,22 +5125,138 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
     if cmd == "help":
         return help_text(args[0].lower() if args else "", console)
     if cmd == "status":
-        hints = ", ".join(str(c) for c in owner_hints) or "—"
+        async def names(ids) -> str:
+            return ", ".join([await name_of(i) for i in ids]) or "—"
         acc = (f"аккаунт: {ACCOUNT}" + (f" ({display_name(me)})" if me else "")
                + f"\nличность: {P['name']} (поведение — {persona_src(PERSONALITY_FILE)}, "
                f"о себе — {persona_src(PERSONA_FILE)}, медиа — {persona_src(MEDIA_DIR)})")
         q = LLM_QUEUE["waiting"]
+        allow_extra = "".join(
+            [f" + {', '.join(state['allow_add'].values())}" if state["allow_add"] else "",
+             f" − {', '.join(state['allow_del'].values())}" if state["allow_del"] else ""])
+        approve_chats = [k for k, v in state["chat_cfg"].items() if v.get("approve")]
+        approve_all = state.get("approve_default", CFG["approve"])
+        target = "«Избранное»" if NOTIFY_TARGET == "me" else CFG["notify_chat"]
         return (f"{'⏸ пауза' if state['paused'] else '▶️ работает'}\n{acc}\n"
                 f"модель: {'ждёт очереди ' + str(q) if q else 'свободна' if LLM_SLOTS else 'без очереди'}\n"
-                f"белый список: {', '.join(sorted(CFG['allow'])) or '—'}\n"
+                f"белый список: {', '.join(sorted(CFG['allow'])) or '—'}{allow_extra}\n"
                 f"не-контакты: {'да' if CFG['allow_non_contacts'] else 'нет'}\n"
                 f"анонимный чат: {'@' + CFG['anon_bot'] if CFG['anon_bot'] else '—'}\n"
-                f"заглушены: {', '.join(state['muted']) or '—'}\n"
-                f"указания: {hints}\n"
+                f"заглушены: {await names(state['muted'])}\n"
+                f"указания: {await names(owner_hints)}\n"
+                f"сон: {sleep_text()}\n"
+                f"подтверждение: {'всё' if approve_all else 'выкл'}"
+                + (f"; чаты: {await names(approve_chats)}" if approve_chats and not approve_all else "")
+                + (f" — ждут черновики: {len(state['drafts'])} (drafts)" if state["drafts"] else "") + "\n"
+                f"настройки чатов: {len(state['chat_cfg'])} (set <кто>)\n"
+                f"уведомления: {CFG['notify']} → {target}\n"
                 f"медиа: {', '.join(sorted(MEDIA_SEND)) or 'выключено'}"
-                f"{' (сам не предлагает)' if MEDIA_SEND and not MEDIA_SELF else ''}\n"
+                f"{' (сам не предлагает)' if MEDIA_SEND and not MEDIA_SELF else ''}"
+                + (f"; отложено: {len(state['media_queue'])}" if state["media_queue"] else "") + "\n"
                 f"звонки: {CFG['calls']}\n"
-                f"думает сейчас: {', '.join(str(c) for c in worker_started) or '—'}")
+                f"думает сейчас: {await names(worker_started)}")
+    if cmd in ("drafts", "ok", "ok!", "no", "edit", "redo"):
+        return await draft_command(cmd, list(args), current)
+    if cmd == "approve":
+        val = args[-1].lower() if args and (args[-1].lower() in _ON | _OFF or args[-1] == "-") else None
+        who = args[:-1] if val is not None else args
+        if not who and (val is None or current is None):
+            if val is not None:   # approve on/off без <кто> и без открытого чата — для всех
+                state["approve_default"] = val in _ON
+                save_state()
+                return ("✋ теперь все ответы — только после твоего подтверждения (черновики в «Избранном»)"
+                        if state["approve_default"] else "▶️ подтверждение выключено: бот отвечает сам"
+                        + (" (кроме чатов, где approve on)" if any(v.get("approve") for v in state["chat_cfg"].values()) else ""))
+            on = [k for k, v in state["chat_cfg"].items() if v.get("approve") is True]
+            off = [k for k, v in state["chat_cfg"].items() if v.get("approve") is False]
+            names_on = ", ".join([await name_of(i) for i in on]) or "—"
+            names_off = ", ".join([await name_of(i) for i in off]) or "—"
+            return (f"подтверждение для всех: {'вкл' if state.get('approve_default', CFG['approve']) else 'выкл'}\n"
+                    f"включено в чатах: {names_on}\nвыключено в чатах: {names_off}\n"
+                    "approve on|off — всем, approve <кто> on|off|- — одному чату")
+        line = f"{' '.join(who)} approve {val if val is not None else 'on'}".strip()
+        return await run_command("set " + line, current, console)
+    if cmd == "set":
+        # «set [кто] ключ значение»: <кто> — всё до первого ключа (имя может быть из двух слов)
+        at = next((i for i, a in enumerate(args) if a.lower() in CHAT_KEYS), len(args))
+        who, rest = args[:at], " ".join(args[at:])
+        if who:
+            user, _, err = await _target(who, current, False, name_only=True)
+        else:
+            user, err = current, "" if current else "кому? set <кто> <ключ> <значение>, или сначала open"
+        if err:
+            return err
+        cid = str(user.id)
+        cfg = state["chat_cfg"].get(cid, {})
+        bits = rest.split(None, 1)
+        if not bits:
+            rows = [f"  {k:<8} {chat_value_text(k, v)}" for k, v in cfg.items()]
+            return (f"⚙️ {who_name(user)}:\n" + ("\n".join(rows) if rows else "  (всё как в .env)")
+                    + "\n\nключи:\n" + "\n".join(f"  {k:<8} {v}" for k, v in CHAT_KEYS.items()))
+        key = bits[0].lower()
+        if key not in CHAT_KEYS:
+            return f"нет настройки «{key}» — {', '.join(CHAT_KEYS)} (help set)"
+        raw = bits[1] if len(bits) > 1 else ""
+        if raw.strip() in ("-", "reset", "сброс"):
+            cfg.pop(key, None)
+            msg = f"⚙️ {who_name(user)}: {key} — снова как в .env"
+        else:
+            if not raw.strip():
+                return f"{key}: {CHAT_KEYS[key]}"
+            val, perr = parse_chat_value(key, raw)
+            if perr:
+                return perr
+            cfg[key] = val
+            msg = f"⚙️ {who_name(user)}: {key} = {chat_value_text(key, val)}"
+        if cfg:
+            state["chat_cfg"][cid] = cfg
+        else:
+            state["chat_cfg"].pop(cid, None)
+        save_state()
+        if key == "approve" and cfg.get("approve") is False:
+            await drop_chat_drafts(user.id, "подтверждение выключено")
+        return msg
+    if cmd in ("allow", "deny"):
+        if CFG["anon_bot"]:
+            return "режим анонимного чата (ANON_BOT): белый список не используется"
+        if not args and current is None:
+            return await allow_overview()
+        user, _, err = await _target(args, current, False, name_only=True)
+        if err:
+            return err
+        uid, label = str(user.id), who_name(user)
+        if cmd == "allow":
+            state["allow_del"].pop(uid, None)
+            state["allow_add"][uid] = label
+            was_muted = uid in state["muted"]
+            state["muted"] = [x for x in state["muted"] if x != uid]
+            save_state()
+            return f"✅ {label}: бот ему отвечает" + (" (и снял mute)" if was_muted else "")
+        state["allow_add"].pop(uid, None)
+        state["allow_del"][uid] = label
+        save_state()
+        task = workers.pop(user.id, None)
+        if task:
+            task.cancel()
+        await drop_chat_drafts(user.id, "deny")
+        return f"⛔ {label}: бот ему больше не отвечает (главнее ALLOW_USERS; вернуть — allow)"
+    if cmd == "undo":
+        rest, n = list(args), None
+        if rest and rest[-1].isdigit() and len(rest[-1]) <= 2 and (len(rest) > 1 or current):
+            n = int(rest.pop())
+        user, _, err = await _target(rest, current, False, name_only=True)
+        if err:
+            return err
+        cid = str(user.id)
+        mine = state["bot_ids"].get(cid, [])
+        ids = mine[-n:] if n else (state["last_reply"].get(cid) or mine[-1:])
+        if not ids:
+            return f"{who_name(user)}: бот ему ничего не отправлял (или уже удалено)"
+        await tg(client.delete_messages(user.id, ids, revoke=True))
+        forget_bot_msgs(user.id, ids)
+        print(f"[undo] {who_name(user)}: удалил {len(ids)} сообщ. бота {ids}")
+        return (f"🗑 {who_name(user)}: удалил у обоих {len(ids)} сообщ. бота. Ответить заново — "
+                "tell <как ответить>, иначе бот ответит, когда он напишет ещё")
     if cmd == "chats":
         n = int(args[0]) if args and args[0].isdigit() else 15
         _last_chats.clear()
@@ -4624,7 +5290,8 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
             return "перезапуск уже ждёт — бот ещё думает: " + (", ".join(map(str, worker_started)) or "—")
         RESTART["pending"] = True
         spawn(restart_when_idle())
-        lost = f"\n⚠️ отложенные медиа ({len(_media_tasks)}) не уйдут" if _media_tasks else ""
+        lost = (f"\n⏳ отложенные медиа ({len(state['media_queue'])}) уйдут после перезапуска"
+                if state["media_queue"] else "")
         if worker_started:
             return (f"🔄 перезапущусь, как только бот допишет ответ (думает: "
                     f"{', '.join(map(str, worker_started))}); новые ответы пока не начинаю{lost}")
@@ -4644,14 +5311,14 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         # «history 50» в открытом чате или «history @x 50» — число в конце = сколько сообщений
         if rest and rest[-1].isdigit() and len(rest[-1]) <= 3 and (len(rest) > 1 or current):
             n = int(rest.pop())
-        user, _, err = await _target(rest, current, False)
+        user, _, err = await _target(rest, current, False, name_only=True)
         if err:
             return err
         msgs = await tg_iter(client.iter_messages(user.id, limit=min(n, 200)))
         name = display_name(user) if not is_anon_bot(user) else "он"
         return f"── {who_name(user)} ──\n" + ("\n".join(format_msg(m, name) for m in reversed(msgs)) or "пусто")
     if cmd in ("mute", "unmute", "forget"):
-        user, _, err = await _target(args, current, False)
+        user, _, err = await _target(args, current, False, name_only=True)
         if err:
             return err
         uid = str(user.id)
@@ -4660,6 +5327,8 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
                     else f"{who_name(user)}: указаний нет")
         state["muted"] = sorted(set(state["muted"]) | {uid}) if cmd == "mute" else [x for x in state["muted"] if x != uid]
         save_state()
+        if cmd == "mute":
+            await drop_chat_drafts(user.id, "mute")
         return f"🔇 {who_name(user)} — больше не отвечаю" if cmd == "mute" else f"🔈 {who_name(user)} — снова отвечаю"
     if cmd == "sync":
         full = any(a.lower() in ("full", "полностью") for a in args)
@@ -4674,7 +5343,7 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
             return (f"🧠 {'перечитываю всю переписку и строю заметки заново' if full else 'дописываю новое в память'}: "
                     f"{len(people)} чел. — это в фоне, ход виден в логе ([memory])"
                     + ("; то, что ты сам говорил о людях (note), остаётся" if full else ""))
-        user, _, err = await _target(args, current, False)
+        user, _, err = await _target(args, current, False, name_only=True)
         if err:
             return err
         if is_anon_bot(user):
@@ -4695,7 +5364,7 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
     if cmd == "info":
         if not args and current is None:
             return contacts_overview()
-        user, _, err = await _target(args, current, False)
+        user, _, err = await _target(args, current, False, name_only=True)
         if err:
             return err
         if is_anon_bot(user):
@@ -4732,6 +5401,7 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
             # on_outgoing для сообщения с телефона: показать в ub, отметить «ты влез», в память
             watch_push(user.id, msg)
             manual_during.add(user.id)
+            await drop_chat_drafts(user.id, "ты написал сам")
             if not (ANON_CHAT_ID is not None and user.id == ANON_CHAT_ID):
                 schedule_contact_sync(user.id)
             else:
@@ -4751,6 +5421,16 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
 
 async def on_command(event):
     text = (event.raw_text or "").strip()
+    rid = event.message.reply_to_msg_id
+    d = next((x for x in state["drafts"] if x.get("card") == rid), None) if rid else None
+    if d and text and not re.match(r"\.ub(\s|$)", text):
+        # ответ (reply) на карточку черновика: «+», «-», «redo …» или свой текст вместо черновика
+        try:
+            reply = await draft_by_reply(d, text)
+        except Exception as exc:  # noqa: BLE001
+            reply = f"⚠️ {exc}"
+        await tg(event.reply(reply[:4000]))
+        return
     if not re.match(r"\.ub(\s|$)", text):
         return
     try:
@@ -4890,6 +5570,8 @@ async def catch_up(max_age_hours: float = 24) -> None:
             continue
         if d.id in workers:
             continue  # уже отвечаем
+        if any(x["chat_id"] == d.id for x in state["drafts"]):
+            continue  # ответ уже ждёт твоего подтверждения (непрочитано — потому что черновик)
         print(f"[userbot] непрочитанное от {display_name(d.entity)} — отвечу")
         last_incoming[d.id] = time.time()
         workers[d.id] = spawn(worker(d.id, d.entity))
@@ -4900,7 +5582,50 @@ async def resume_catch_up() -> None:
         await catch_up()
     except Exception as exc:  # noqa: BLE001
         print(f"[userbot] после resume не смог поднять непрочитанное: {exc}", file=sys.stderr)
-        await notify(f"⚠️ после resume не смог поднять непрочитанное: {exc}")
+        await notify(f"⚠️ после resume не смог поднять непрочитанное: {exc}", important=True)
+
+
+async def sleep_watch() -> None:
+    """Анонимный чат: ночью новых собеседников не ищем, утром — сами жмём /search."""
+    was = bool(sleep_until())
+    while True:
+        await asyncio.sleep(60)
+        now_asleep = bool(sleep_until())
+        if was and not now_asleep:
+            print("[сон] утро — снова отвечаю")
+            if CFG["anon_bot"] and ANON_CHAT_ID and CFG["auto_next"] and not state["paused"] \
+                    and not state.get("anon_active"):
+                spawn(auto_search(ANON_CHAT_ID))
+        elif now_asleep and not was:
+            print(f"[сон] часы сна ({sleep_text()}) — отвечу на накопившееся утром")
+        was = now_asleep
+
+
+LOG_FILE = STATE_DIR / "userbot.log"
+
+
+async def log_rotate_watch() -> None:
+    """state/userbot.log (его ведёт run.sh) больше LOG_MAX_MB — копия в userbot.log.1, а сам лог
+    обнуляется. Без этого он рос всё время работы: run.sh начинает новый лог только при своём запуске.
+    run.sh пишет в лог в режиме дозаписи, поэтому после обнуления новые строки идут с начала файла."""
+    limit = CFG["log_max_mb"] * 1024 * 1024
+    if limit <= 0:
+        return
+    try:
+        st_out, st_log = os.fstat(sys.__stdout__.fileno()), LOG_FILE.stat()
+    except (OSError, ValueError, AttributeError):
+        return
+    if (st_out.st_dev, st_out.st_ino) != (st_log.st_dev, st_log.st_ino):
+        return   # лог не в этот файл (systemd/journal, терминал) — не наше дело
+    while True:
+        await asyncio.sleep(300)
+        try:
+            if LOG_FILE.stat().st_size > limit:
+                shutil.copyfile(LOG_FILE, LOG_FILE.with_name("userbot.log.1"))
+                os.truncate(LOG_FILE, 0)
+                print(f"[userbot] лог больше {CFG['log_max_mb']:g} МБ — прежний в userbot.log.1")
+        except OSError as exc:
+            print(f"[userbot] не смог обрезать лог: {exc}", file=sys.stderr)
 
 
 _LOCK_FH = None
@@ -4954,10 +5679,15 @@ def recover_session(session: Path) -> bool:
 
 
 async def main() -> None:
-    global me, client, ANON_CHAT_ID
-    if "--test-harness" in sys.argv:
+    global me, client, ANON_CHAT_ID, NOTIFY_TARGET
+    if CFG["engine"] not in ENGINES:
+        sys.exit(f"ENGINE={CFG['engine']!r} не поддерживается: {' | '.join(ENGINES)}"
+                 + (". DeepSeek Harness (dsh) больше не поддерживается — DeepSeek подключается напрямую: "
+                    "ENGINE=openai, LLM_URL=https://api.deepseek.com/v1, LLM_MODEL=deepseek-chat, LLM_API_KEY=…"
+                    if CFG["engine"] == "dsh" else ""))
+    if "--test-model" in sys.argv or "--test-harness" in sys.argv:   # --test-harness — старое имя
         hist = ["[01.01 12:00] Тест: привет, как дела?"]
-        print(await run_harness(build_task("Тест", hist), build_messages("Тест", hist)))
+        print(await run_model(build_messages("Тест", hist)))
         return
     if not CFG["api_id"] or not CFG["api_hash"]:
         sys.exit("Заполни TG_API_ID и TG_API_HASH в .env (https://my.telegram.org → API development tools)")
@@ -5000,11 +5730,27 @@ async def main() -> None:
         print(f"[userbot] режим «только анонимный чат»: отвечаю лишь в @{CFG['anon_bot']}")
     elif not CFG["allow"] and not CFG["allow_non_contacts"]:
         print("[userbot] внимание: белый список пуст — отвечать некому")
+    if CFG["notify_chat"] and CFG["notify_chat"].lower() not in ("me", "self"):
+        ref = CFG["notify_chat"]
+        try:
+            NOTIFY_TARGET = await tg(client.get_entity(int(ref) if ref.lstrip("-").isdigit() else ref), 30)
+            print(f"[userbot] уведомления ({CFG['notify']}) → {ref}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[userbot] NOTIFY_CHAT={ref}: не нашёл ({exc}) — уведомления в «Избранное»", file=sys.stderr)
+    if SLEEP:
+        print(f"[сон] часы сна: {sleep_text()}")
     spawn(preload_whisper())
     spawn(watchdog())
+    spawn(log_rotate_watch())
     if CFG["anon_bot"]:
         spawn(anon_idle_watch())
+    if SLEEP:
+        spawn(sleep_watch())
     await catch_up()
+    if state["media_queue"]:
+        await restore_media_queue()
+    if state["drafts"]:
+        print(f"[approve] ждут подтверждения черновики: {', '.join('#' + str(d['no']) for d in state['drafts'])}")
     if CFG["sync_all"]:
         spawn(sync_all_contacts())
     else:

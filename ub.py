@@ -3,7 +3,7 @@
 
 ./run.sh   запускает бота в фоне и сразу открывает ub (exit — остановить бота).
 ./ub       подключиться к уже запущенному боту из другого терминала (exit — только выйти).
-./ub status   одна команда и выход.
+./ub status, ./ub all pause, ./ub logs — одна команда и выход.
 ./ub -a work  работать с аккаунтом work (без -a — первый запущенный).
 В ub: accounts — список аккаунтов, use <имя> — переключиться, all <команда> — на всех.
 """
@@ -453,8 +453,94 @@ def wait_any(wait: float) -> list[str]:
         time.sleep(0.5)
 
 
+LOCAL_CMDS = {"accounts", "all", "logs", "use", "clear", "exit", "quit", "q"}
+
+
+def normalize(parts: list[str]) -> list[str]:
+    """Сокращения ub: «restart all» = «all restart», «all logs» = «logs all», в общем режиме
+    «sync all» — память во всех аккаунтах."""
+    cmd = parts[0].lower()
+    if cmd in ALL_SUFFIX_CMDS and any(x.lower() == "all" for x in parts[1:]):
+        # restart all = all restart (и pause/resume/status…): у этих команд нет текста, «all» не спутать
+        return ["all", cmd] + [x for x in parts[1:] if x.lower() != "all"]
+    if cmd == "sync" and state["account"] is None and any(x.lower() in ("all", "все", "всех") for x in parts[1:]):
+        return ["all"] + parts   # общий режим: sync all [full] — память всех людей во всех аккаунтах
+    if cmd == "all" and len(parts) > 1 and parts[1].lower() == "logs":
+        return ["logs", "all"] + parts[2:]   # all logs = logs all
+    return parts
+
+
+def execute(line: str, oneshot: bool = False) -> bool:
+    """Выполнить строку ub — набранную в ub> или переданную в ./ub <команда>. False — пора выходить."""
+    parts = normalize(line.split())
+    cmd = parts[0].lower()
+    if cmd in ("exit", "quit", "q"):
+        return False
+    if cmd == "clear":
+        print("\033[2J\033[H", end="")
+        return True
+    if cmd == "accounts":
+        print(accounts_text())
+        return True
+    if cmd == "use":
+        if oneshot:
+            print("use — только в ub; для одной команды аккаунту: ./ub -a <имя> <команда>")
+        elif len(parts) > 1:
+            print(switch(parts[1]))
+        elif multi():
+            print(switch(None))
+        else:
+            print("аккаунт один — переключаться некуда")
+        return True
+    if cmd == "all":
+        print(colorize(run_all(" ".join(parts[1:]))) if len(parts) > 1 else "all <команда>, например all pause")
+        return True
+    if cmd == "logs":
+        nums = [int(x) for x in parts[1:] if x.isdigit()]
+        every = state["account"] is None or any(x.lower() == "all" for x in parts[1:])
+        log_mode(nums[0] if nums else 40, every=every)
+        return True
+    if state["sock"] is None and cmd in ("help", "h", "?"):
+        print(pretty_help("Общий режим (ub>) — здесь работают:" + LOCAL_HELP.split("В ub:", 1)[1]
+                          + "\n\nКоманды бота (status, chats, open, tell, restart…) — внутри аккаунта: "
+                            "use <имя>, там help покажет их все. Или сразу всем: all <команда>."))
+        return True
+    text = request(line)   # команды боту normalize не меняет — шлём как набрано (с пробелами в тексте)
+    if cmd in ("help", "h", "?"):
+        text = pretty_help(text + (LOCAL_HELP if len(parts) == 1 else ""), title=len(parts) > 1)
+    with print_lock:
+        print(colorize(text))
+    return True
+
+
+def run_oneshot(line: str) -> None:
+    """./ub <команда>: своё (accounts, all, logs) — сами, без подключения; остальное — боту.
+    При нескольких аккаунтах без -a: all/logs/sync all — для всех, команда боту — первому запущенному."""
+    if multi() and not _ASKED:
+        state["account"] = None
+    parts = normalize(line.split())
+    if parts[0].lower() in LOCAL_CMDS:
+        execute(" ".join(parts), oneshot=True)
+        return
+    if state["account"] is None or not _ASKED:
+        on = running()
+        if not on:
+            sys.exit("бот не запущен: сначала ./run.sh")
+        state["account"] = ACCOUNT if ACCOUNT in on else on[0]
+    s = connect(0)
+    if not s:
+        sys.exit(f"бот {state['account']} не запущен: сначала ./run.sh")
+    state["sock"] = s
+    threading.Thread(target=reader, daemon=True).start()
+    time.sleep(0.2)   # пусть придёт hello
+    execute(" ".join(parts), oneshot=True)
+
+
 def main() -> None:
-    general = multi() and not _ASKED and not ARGS   # несколько аккаунтов — стартуем в общем режиме
+    if ARGS:  # ./ub status, ./ub all pause, ./ub -a work tell @x … — одна команда и выход
+        run_oneshot(" ".join(ARGS))
+        return
+    general = multi() and not _ASKED   # несколько аккаунтов — стартуем в общем режиме
     if general:
         on = wait_any(90 if MAIN else 0)
         if not on:
@@ -476,11 +562,6 @@ def main() -> None:
             sys.exit("бот не запущен: сначала ./run.sh")
         state["sock"] = s
     threading.Thread(target=reader, daemon=True).start()
-
-    if ARGS:  # ./ub status — одна команда
-        time.sleep(0.2)
-        print(colorize(request(" ".join(ARGS))))
-        return
 
     import readline
     hist = accounts.state_dir(accounts.MAIN) / "ub_history"
@@ -521,52 +602,8 @@ def main() -> None:
             readline.write_history_file(hist)
         except OSError:
             pass
-        parts = line.split()
-        cmd = parts[0].lower()
-        if cmd in ("exit", "quit", "q"):
+        if not execute(line):
             break
-        if cmd == "clear":
-            print("\033[2J\033[H", end="")
-            continue
-        if cmd == "accounts":
-            print(accounts_text())
-            continue
-        if cmd == "use":
-            if len(parts) > 1:
-                print(switch(parts[1]))
-            elif multi():
-                print(switch(None))
-            else:
-                print("аккаунт один — переключаться некуда")
-            continue
-        if cmd in ALL_SUFFIX_CMDS and any(x.lower() == "all" for x in parts[1:]):
-            # restart all = all restart (и pause/resume/status…): у этих команд нет текста, «all» не спутать
-            parts = ["all", cmd] + [x for x in parts[1:] if x.lower() != "all"]
-            cmd = "all"
-        if cmd == "sync" and state["account"] is None and any(x.lower() in ("all", "все", "всех") for x in parts[1:]):
-            # общий режим: sync all [full] — память всех людей во всех аккаунтах
-            parts = ["all"] + parts
-            cmd = "all"
-        if cmd == "all" and len(parts) > 1 and parts[1].lower() == "logs":
-            cmd, parts = "logs", ["logs", "all"] + parts[2:]   # all logs = logs all
-        if cmd == "all":
-            print(colorize(run_all(" ".join(parts[1:]))) if len(parts) > 1 else "all <команда>, например all pause")
-            continue
-        if cmd == "logs":
-            nums = [int(x) for x in parts[1:] if x.isdigit()]
-            every = state["account"] is None or any(x.lower() == "all" for x in parts[1:])
-            log_mode(nums[0] if nums else 40, every=every)
-            continue
-        if state["sock"] is None and cmd in ("help", "h", "?"):
-            print(pretty_help("Общий режим (ub>) — здесь работают:" + LOCAL_HELP.split("В ub:", 1)[1]
-                              + "\n\nКоманды бота (status, chats, open, tell, restart…) — внутри аккаунта: "
-                                "use <имя>, там help покажет их все. Или сразу всем: all <команда>."))
-            continue
-        text = request(line)
-        if cmd in ("help", "h", "?"):
-            text = pretty_help(text + (LOCAL_HELP if len(parts) == 1 else ""), title=len(parts) > 1)
-        with print_lock:
-            print(colorize(text))
     state["quit"] = True
     if MAIN:
         print("останавливаю бота…")

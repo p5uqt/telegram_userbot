@@ -12,7 +12,6 @@ personality.toml
 .venv/
 __pycache__/
 *.pyc
-sandbox/
 media/
 
 # личные инструменты, не часть проекта
