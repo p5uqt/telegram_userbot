@@ -518,6 +518,8 @@ def run_oneshot(line: str) -> None:
     При нескольких аккаунтах без -a: all/logs/sync all — для всех, команда боту — первому запущенному."""
     if multi() and not _ASKED:
         state["account"] = None
+    elif not _ASKED and accounts.list_accounts() and ACCOUNT not in accounts.list_accounts():
+        state["account"] = accounts.list_accounts()[0]   # единственный аккаунт называется не main
     parts = normalize(line.split())
     if parts[0].lower() in LOCAL_CMDS:
         execute(" ".join(parts), oneshot=True)

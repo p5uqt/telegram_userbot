@@ -4721,6 +4721,11 @@ async def _send_draft(d: dict, text: str | None) -> None:
             reply = text
         else:
             caption = text   # черновик был «медиа + подпись» — правишь подпись
+    # отправка идёт из команды, а не из ответа: виды медиа и язык чата выставляем сами,
+    # иначе set <кто> media … не действует и медиа из черновика «не находится»
+    cm = chat_cfg(chat_id).get("media")
+    CHAT_MEDIA.set(set(cm) if cm is not None else None)
+    MEDIA_LANG.set("en" if d["english"] else "ru")
     try:
         await tg(client.send_read_acknowledge(chat_id))
         await deliver_reply(chat_id, d["name"], reply, acts, caption, d["anon"], d["now_media"],
@@ -4838,6 +4843,92 @@ def sleep_text() -> str:
     return span + (f", сейчас сплю до {time.strftime('%H:%M', time.localtime(until))}" if until else "")
 
 
+# ── reset: изменения командами поверх .env ──────────────────────────────────
+_RESET_PARTS = ("approve", "allow", "chats", "mute", "all")
+_RESET_ALIASES = {"set": "chats", "чаты": "chats", "deny": "allow", "unmute": "mute", "всё": "all", "все": "all"}
+
+
+async def overrides_text() -> str:
+    """Всё, что сейчас изменено командами ub поверх .env (state.json)."""
+    rows = []
+    if "approve_default" in state:
+        rows.append(f"approve (всем): {'on' if state['approve_default'] else 'off'} — в .env APPROVE="
+                    f"{1 if CFG['approve'] else 0}   → reset approve")
+    if state["allow_add"]:
+        rows.append(f"allow (добавлены): {', '.join(state['allow_add'].values())}   → reset allow")
+    if state["allow_del"]:
+        rows.append(f"deny (убраны): {', '.join(state['allow_del'].values())}   → reset allow")
+    for cid, cfg in list(state["chat_cfg"].items()):
+        vals = ", ".join(f"{k} {chat_value_text(k, v)}" for k, v in cfg.items())
+        rows.append(f"set {await name_of(cid)}: {vals}   → reset @ник / reset chats")
+    if state["muted"]:
+        rows.append(f"mute: {', '.join([await name_of(i) for i in state['muted']])}   → reset mute")
+    if state["paused"]:
+        rows.append("pause: бот на паузе   → resume")
+    if not rows:
+        return "командами ничего не изменено — всё как в .env"
+    resettable = "approve_default" in state or state["allow_add"] or state["allow_del"] or state["chat_cfg"]
+    return ("изменено командами (главнее .env):\n  " + "\n  ".join(rows)
+            + ("\n\nreset all — сбросить approve, allow и chats" if resettable else ""))
+
+
+def _reset_part(part: str) -> str:
+    if part == "approve":
+        n = sum(1 for cfg in state["chat_cfg"].values() if "approve" in cfg)
+        state.pop("approve_default", None)
+        for cid in list(state["chat_cfg"]):
+            state["chat_cfg"][cid].pop("approve", None)
+            if not state["chat_cfg"][cid]:
+                del state["chat_cfg"][cid]
+        return f"approve — снова по .env (APPROVE={1 if CFG['approve'] else 0}), снято в чатах: {n}"
+    if part == "allow":
+        n = len(state["allow_add"]) + len(state["allow_del"])
+        state["allow_add"].clear()
+        state["allow_del"].clear()
+        return f"белый список — снова только ALLOW_USERS из .env (снято изменений: {n})"
+    if part == "chats":
+        n = len(state["chat_cfg"])
+        state["chat_cfg"].clear()
+        return f"настройки чатов (set) сброшены: {n}"
+    n = len(state["muted"])
+    state["muted"] = []
+    return f"mute снят со всех: {n}"
+
+
+async def reset_command(args: list[str], current: User | None) -> str:
+    words = [_RESET_ALIASES.get(a.lower(), a.lower()) for a in args]
+    if not args:
+        return await overrides_text()
+    if words[0] in _RESET_PARTS:
+        part = words[0]
+        if part == "all":
+            if not any(w in ("yes", "да", "y") for w in words[1:]):
+                return (await overrides_text()
+                        + "\n\nСбросить approve, allow и chats к .env? Повтори: reset all yes (mute и pause не трогаю)")
+            out = [_reset_part(x) for x in ("approve", "allow", "chats")]
+        else:
+            out = [_reset_part(part)]
+        save_state()
+        print(f"[reset] {' '.join(args)}")
+        return "↩️ " + "\n↩️ ".join(out)
+    user, _, err = await _target(args, current, False, name_only=True)
+    if err:
+        return err
+    uid = str(user.id)
+    changed = []
+    if state["chat_cfg"].pop(uid, None):
+        changed.append("set и approve")
+    if state["allow_add"].pop(uid, None):
+        changed.append("allow")
+    if state["allow_del"].pop(uid, None):
+        changed.append("deny")
+    if not changed:
+        return f"{who_name(user)}: командами ничего не менялось — всё как в .env"
+    save_state()
+    return f"↩️ {who_name(user)}: сброшено ({', '.join(changed)}) — теперь как в .env" + (
+        "\n(mute не трогал — unmute)" if uid in state["muted"] else "")
+
+
 # ── команды: общие для ./ub и «Избранного» (.ub ...) ────────────────────
 # (команда, аргументы, описание, только в ub)
 COMMANDS = [
@@ -4864,6 +4955,7 @@ COMMANDS = [
     ("approve", "[кто] [on|off]", "ответы только после твоего подтверждения: чату или всем (без <кто>)", False),
     ("set", "[кто] [ключ значение]", "настройки чата: approve, delay, limit, media, tone, sleep", False),
     ("allow", "[кто]", "отвечать человеку (без перезапуска); без <кто> — белый список", False),
+    ("reset", "[кто|что|all]", "что изменено командами поверх .env; сбросить к значениям из .env", False),
     ("deny", "[кто]", "не отвечать человеку, даже если он в ALLOW_USERS", False),
     ("restart", "[cancel]", "перезапустить бота, когда закончит думать; все аккаунты — restart all", False),
     ("pause", "", "поставить все автоответы на паузу", False),
@@ -4938,6 +5030,17 @@ HELP_DETAILS = {
 for _c in ("drafts", "ok", "edit", "no", "redo"):
     HELP_DETAILS[_c] = HELP_DETAILS["approve"]
 HELP_DETAILS["deny"] = HELP_DETAILS["allow"]
+HELP_DETAILS["reset"] = (
+    "Команды ub (approve, allow/deny, set, mute) сохраняются в state.json и главнее .env. reset показывает "
+    "их и возвращает как в .env.\n"
+    "  reset               показать всё, что изменено командами (ничего не сбрасывает)\n"
+    "  reset @masha        всё по одному человеку: его set, approve, allow/deny\n"
+    "  reset approve       подтверждение: общее и во всех чатах — снова по APPROVE из .env\n"
+    "  reset allow         белый список — снова только ALLOW_USERS из .env\n"
+    "  reset chats         настройки set во всех чатах\n"
+    "  reset mute          снять mute со всех\n"
+    "  reset all           approve + allow + chats (mute и pause не трогает); спросит подтверждение: reset all yes\n"
+    "Черновики, которые уже ждут, остаются: ok / no.")
 _last_chats: list[User] = []   # номера для «open 3»
 
 
@@ -5128,7 +5231,8 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         return help_text(args[0].lower() if args else "", console)
     if cmd == "status":
         async def names(ids) -> str:
-            return ", ".join([await name_of(i) for i in ids]) or "—"
+            snapshot = list(ids)   # пока ждём имена, бот может начать/закончить ответ — словарь изменится
+            return ", ".join([await name_of(i) for i in snapshot]) or "—"
         acc = (f"аккаунт: {ACCOUNT}" + (f" ({display_name(me)})" if me else "")
                + f"\nличность: {P['name']} (поведение — {persona_src(PERSONALITY_FILE)}, "
                f"о себе — {persona_src(PERSONA_FILE)}, медиа — {persona_src(MEDIA_DIR)})")
@@ -5176,8 +5280,17 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
             return (f"подтверждение для всех: {'вкл' if state.get('approve_default', CFG['approve']) else 'выкл'}\n"
                     f"включено в чатах: {names_on}\nвыключено в чатах: {names_off}\n"
                     "approve on|off — всем, approve <кто> on|off|- — одному чату")
-        line = f"{' '.join(who)} approve {val if val is not None else 'on'}".strip()
-        return await run_command("set " + line, current, console)
+        if val is None:   # approve @masha — показать, а не включить молча
+            user, _, err = await _target(who, current, False, name_only=True)
+            if err:
+                return err
+            own = chat_cfg(user.id).get("approve")
+            general = state.get("approve_default", CFG["approve"])
+            return (f"подтверждение для {who_name(user)}: {'вкл' if needs_approval(user.id) else 'выкл'} "
+                    + (f"(своя настройка; для всех — {'вкл' if general else 'выкл'})" if own is not None
+                       else "(как для всех)")
+                    + f"\napprove {'@ник ' if not current else ''}on | off | - — включить / выключить / как для всех")
+        return await run_command(f"set {' '.join(who)} approve {val}".strip(), current, console)
     if cmd == "set":
         # «set [кто] ключ значение»: <кто> — всё до первого ключа (имя может быть из двух слов)
         at = next((i for i, a in enumerate(args) if a.lower() in CHAT_KEYS), len(args))
@@ -5218,6 +5331,8 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         if key == "approve" and cfg.get("approve") is False:
             await drop_chat_drafts(user.id, "подтверждение выключено")
         return msg
+    if cmd == "reset":
+        return await reset_command(args, current)
     if cmd in ("allow", "deny"):
         if CFG["anon_bot"]:
             return "режим анонимного чата (ANON_BOT): белый список не используется"

@@ -467,6 +467,7 @@ ub[Masha (@masha)]> exit      # stop the bot
 | `pause` / `resume` | stop / resume auto-replies; after `resume` the bot answers what came in during the pause (no older than `CATCH_UP_HOURS`) |
 | `mute [who]` / `unmute [who]` | don't reply to a specific person |
 | `allow [who]` / `deny [who]` | add a person to the whitelist / remove them — no restart, overrides `ALLOW_USERS`; `allow` without `<who>` — the whole list |
+| `reset [who\|what\|all]` | show what was changed by commands (`approve`, `allow`/`deny`, `set`, `mute`) on top of `.env`, and reset it to `.env`: `reset @nick`, `reset approve`, `reset allow`, `reset chats`, `reset mute`, `reset all yes` |
 | `undo [who] [n]` | delete the bot's last reply for both sides (or the bot's last `n` messages) |
 | `set [who] [key value]` | per-chat settings: `approve`, `delay`, `limit`, `media`, `tone`, `sleep` (see below) |
 | `approve [who] [on\|off]` | replies only after approval: for one chat or (without `<who>`) for all |
