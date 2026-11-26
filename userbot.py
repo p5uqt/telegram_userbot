@@ -183,6 +183,8 @@ CFG = {
     "control_bot_token": os.environ.get("CONTROL_BOT_TOKEN", "").strip(),
     # кто может им пользоваться: id / @ник через запятую; пусто — владельцы аккаунтов userbot
     "control_bot_admins": [x.strip() for x in os.environ.get("CONTROL_BOT_ADMINS", "").split(",") if x.strip()],
+    # язык бота управления по умолчанию: en | ru (каждый админ может сменить в меню)
+    "control_bot_lang": "ru" if os.environ.get("CONTROL_BOT_LANG", "en").strip().lower().startswith("ru") else "en",
     # какие уведомления присылает бот управления: all | important | off
     "control_bot_notify": {"0": "off", "off": "off", "all": "all", "1": "all"}.get(
         os.environ.get("CONTROL_BOT_NOTIFY", "important").strip().lower(), "important"),
@@ -4685,6 +4687,7 @@ async def make_draft(chat_id: int, user: User, name: str, reply: str, acts: list
           + (f" + {', '.join(a[1] for a in acts)}" if acts else ""))
     for conn in CONTROL_CONNS:   # ub покажет строку text, бот управления — карточку card с кнопками
         _conn_send(conn, {"type": "msg", "kind": "draft", "no": d["no"], "card": draft_card(d),
+                          "draft": {k: d.get(k) for k in ("who", "reply", "caption", "acts", "hint")},
                           "text": f"✋ черновик {draft_short(d)}\n   ok {d['no']} · edit {d['no']} <текст> · "
                                   f"no {d['no']} · redo {d['no']} [указание]"})
 
@@ -4694,7 +4697,10 @@ async def close_draft(d: dict, status: str) -> None:
     if d in state["drafts"]:
         state["drafts"].remove(d)
         save_state()
-    push_subscribers({"type": "msg", "kind": "draft_done", "no": d["no"], "status": status, "text": ""})
+    code = ("edited" if status.startswith("вместо") else "sent" if status.startswith("отправлен")
+            else "replaced" if status.startswith("заменён") else "redo" if status.startswith("переписываю")
+            else "cancelled")
+    push_subscribers({"type": "msg", "kind": "draft_done", "no": d["no"], "status": status, "code": code, "text": ""})
     if d.get("card"):
         try:
             await tg(client.edit_message("me", d["card"], (draft_card(d).rsplit("\n\n", 1)[0]
@@ -5222,6 +5228,71 @@ async def send_media_now(chat_id: int, user: User, it: dict) -> None:
         await notify(f"⚠️ не смог отправить {it['name']}: {exc}", important=True)
 
 
+def _chat_item(u: User, d=None) -> dict:
+    last = d.message if d is not None else None
+    preview = " ".join(PHOTO_TAG_RE.sub(media_plain, describe(last) if last else "").split())[:60]
+    return {"id": u.id, "name": who_name(u), "muted": str(u.id) in state["muted"], "hint": u.id in owner_hints,
+            "thinking": u.id in worker_started, "unread": d.unread_count if d is not None else 0,
+            "draft": any(x["chat_id"] == u.id for x in state["drafts"]),
+            "out": bool(last and last.out), "preview": preview}
+
+
+async def data_command(cmd: str, args: list[str]) -> str:
+    """__summary / __chats [сдвиг] [n] / __chat <id> / __drafts — для кнопок бота управления."""
+    if cmd == "__summary":
+        async def names(ids) -> list[str]:
+            return [await name_of(i) for i in list(ids)]
+        a, b = SLEEP or (0, 0)
+        until = sleep_until()
+        return json.dumps({
+            "account": ACCOUNT, "me": display_name(me) if me else ACCOUNT, "persona": P["name"],
+            "paused": state["paused"], "drafts": len(state["drafts"]),
+            "sleep": sleep_text(), "sleep_on": bool(SLEEP), "asleep": bool(until),
+            "sleep_span": f"{a // 60:02d}:{a % 60:02d}–{b // 60:02d}:{b % 60:02d}" if SLEEP else "",
+            "sleep_until": time.strftime("%H:%M", time.localtime(until)) if until else "",
+            "approve": bool(state.get("approve_default", CFG["approve"])),
+            "approve_chats": await names(k for k, v in list(state["chat_cfg"].items()) if v.get("approve")),
+            "thinking": len(worker_started), "thinking_names": await names(worker_started),
+            "anon": CFG["anon_bot"], "whitelist": sorted(CFG["allow"]),
+            "allow_add": list(state["allow_add"].values()), "allow_del": list(state["allow_del"].values()),
+            "non_contacts": CFG["allow_non_contacts"], "muted": await names(state["muted"]),
+            "hints": await names(owner_hints), "queue": LLM_QUEUE["waiting"], "slots": LLM_SLOTS,
+            "media": sorted(MEDIA_SEND), "media_self": MEDIA_SELF, "media_queue": len(state["media_queue"]),
+            "calls": CFG["calls"], "notify": CFG["notify"], "chat_cfg": len(state["chat_cfg"]),
+        }, ensure_ascii=False)
+    if cmd == "__chats":
+        off = int(args[0]) if args and args[0].isdigit() else 0
+        n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 8
+        _last_chats.clear()
+        items = []
+        for d in await tg_iter(client.iter_dialogs(limit=80)):
+            u = d.entity
+            if not isinstance(u, User) or u.is_self or (u.bot and not is_anon_bot(u)):
+                continue
+            _last_chats.append(u)   # номера те же, что в chats: «open 3» работает и после кнопок
+            items.append(_chat_item(u, d))
+        return json.dumps({"items": items[off:off + n], "more": len(items) > off + n, "total": len(items)},
+                          ensure_ascii=False)
+    if cmd == "__chat":
+        user = await resolve_chat(args[0]) if args else None
+        if not user:
+            return json.dumps({"error": "не нашёл чат"}, ensure_ascii=False)
+        cfg = chat_cfg(user.id)
+        hint = owner_hints.get(user.id)
+        draft = next((x for x in state["drafts"] if x["chat_id"] == user.id), None)
+        return json.dumps({**_chat_item(user), "allowed": allowed(user), "anon": is_anon_bot(user),
+                           "approve": needs_approval(user.id), "approve_own": cfg.get("approve"),
+                           "sleep_on": bool(SLEEP), "sleep_off": cfg.get("sleep") is False,
+                           "hint_text": hint[0] if hint else "", "draft_no": draft["no"] if draft else None,
+                           "settings": {k: chat_value_text(k, v) for k, v in cfg.items()}}, ensure_ascii=False)
+    if cmd == "__drafts":
+        return json.dumps([{"no": d["no"], "who": d["who"], "chat_id": d["chat_id"],
+                            "text": d["reply"] or d.get("caption") or "", "media": [a[1] for a in d["acts"]],
+                            "age_min": int((time.time() - d["created"]) // 60)} for d in state["drafts"]],
+                          ensure_ascii=False)
+    return json.dumps({"error": f"нет команды {cmd}"}, ensure_ascii=False)
+
+
 async def run_command(line: str, current: User | None = None, console: bool = False) -> str:
     """Выполнить команду (без префикса .ub). Возвращает текст ответа."""
     parts = line.split()
@@ -5239,6 +5310,8 @@ async def run_command(line: str, current: User | None = None, console: bool = Fa
         return f"«{cmd}» работает только в ub (./ub в терминале)"
     if cmd == "help":
         return help_text(args[0].lower() if args else "", console)
+    if cmd.startswith("__"):   # служебные команды для бота управления: данные в JSON, в справке их нет
+        return await data_command(cmd, args)
     if cmd == "status":
         async def names(ids) -> str:
             snapshot = list(ids)   # пока ждём имена, бот может начать/закончить ответ — словарь изменится
@@ -5913,7 +5986,8 @@ async def main() -> None:
     if CFG["control_bot_token"]:
         import control_bot  # noqa: PLC0415 — только если включён
         spawn(control_bot.ControlBot(CFG["control_bot_token"], CFG["api_id"], CFG["api_hash"],
-                                     CFG["control_bot_admins"], CFG["control_bot_notify"], ACCOUNT, notify).run())
+                                     CFG["control_bot_admins"], CFG["control_bot_notify"], ACCOUNT, notify,
+                                     CFG["control_bot_lang"]).run())
     await client.run_until_disconnected()
     if RESTART["exit"]:
         sys.exit(RESTART_CODE)

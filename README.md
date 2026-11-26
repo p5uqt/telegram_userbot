@@ -216,6 +216,7 @@ Everything else goes into `persona.md` (see below).
 | `CONTROL_BOT_TOKEN` | empty | control bot token from @BotFather; empty — off (see "Control bot") |
 | `CONTROL_BOT_ADMINS` | empty | who the bot obeys: ids / `@usernames`, comma-separated; empty — owners of the userbot accounts |
 | `CONTROL_BOT_NOTIFY` | `important` | notifications to the control bot: `all` / `important` / `off` |
+| `CONTROL_BOT_LANG` | `en` | default language of the control bot's menus and buttons: `en` / `ru`; each admin changes it for themselves in the menu (🌐) or with `/language` |
 | `LOG_MAX_MB` | `20` | `state/userbot.log` bigger than this moves to `userbot.log.1`; `0` — leave it alone |
 | `ANON_MAX_REPLIES_PER_HOUR` | `60` | limit in the anonymous chat |
 | `ANON_HISTORY_MESSAGES` | `24` | history in the anonymous chat |
@@ -530,6 +531,22 @@ the log and your notifications get `боту управления пишет н�
 username can be changed or taken) and run `all restart`.
 
 **Usage**
+
+After **Start** you get buttons at the bottom of the screen: **📊 Status · 💬 Chats · ✋ Drafts · ☰ Menu**
+(the bot is in English by default; Russian — 🌐 in the menu):
+
+- **☰ Menu** — what's going on (running / paused / asleep, how many drafts wait) and buttons: status,
+  chats, drafts, pause, log, help, accounts.
+- **💬 Chats** — people as buttons (8 per page, ◀️ ▶️ to flip; ✋ draft · 📝 instruction · 💭 thinking ·
+  🔇 muted). Tap a person for the **chat card**: 📜 history · 👁 live · 💡 instruction · ✍️ write ·
+  🧠 memory · 🗑 delete reply (asks for confirmation) · 🔇 mute · ✋ approval · 🌙 sleep.
+  After "💡 instruction" / "✍️ write" / "🧠 memory" the bot asks for the text — your next message is it.
+- **✋ Drafts** — all pending ones with ✅ / 🔁 / ❌ buttons.
+- **🌐 Language** — English (default, `CONTROL_BOT_LANG`) or Russian: menu → 🌐 or `/language`. Each admin
+  has their own, and it's saved. Telegram shows the "/" command menu in your client's language.
+  The output of typed commands (`history`, `note`…) is always in Russian — it's written by the userbot itself.
+
+Text works too — any `ub` command:
 
 ```
 status                 ← commands as in ub, without the dot and .ub
