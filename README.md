@@ -205,6 +205,7 @@ Everything else goes into `persona.md` (see below).
 | `QUIET_SECONDS` | `12` | wait until the other person finishes a burst of messages |
 | `TAKEOVER_MINUTES` | `30` | you wrote yourself in the last N minutes — the bot stays quiet; if the other person wrote after you and you didn't answer, the bot answers once this time is up |
 | `MAX_REPLIES_PER_HOUR` | `20` | reply limit per hour per chat (a reply of several messages counts as one); when hit, the bot answers itself once there is room again. `0` — no limit |
+| `CATCH_UP_HOURS` | `24` | after start and after `resume`, answer unread messages no older than this many hours; `0` — any age (the bot apologises for the delay) |
 | `HISTORY_MESSAGES` | `40` | how many history messages the model sees |
 | `NOTIFY` | `all` | notifications: `all` — everything (every bot reply), `important` — only errors, limits, "wants you personally", calls, `off` — nothing. Old `1` / `0` = `all` / `off` |
 | `NOTIFY_CHAT` | empty | where notifications go: empty — Saved Messages; `@channel`, `@group` or an id. `.ub` commands and drafts always use Saved Messages |
@@ -463,7 +464,7 @@ ub[Masha (@masha)]> exit      # stop the bot
 | `send [who] <file>` | send media from `media/` right away, without the model |
 | `media` | list of media with descriptions |
 | `restart [cancel]` | restart the bot (current account) once it finishes the current replies (after changing `.env`, `personality.toml`, code); all accounts — `all restart` |
-| `pause` / `resume` | stop / resume auto-replies; after `resume` the bot answers what came in during the pause (no older than a day) |
+| `pause` / `resume` | stop / resume auto-replies; after `resume` the bot answers what came in during the pause (no older than `CATCH_UP_HOURS`) |
 | `mute [who]` / `unmute [who]` | don't reply to a specific person |
 | `allow [who]` / `deny [who]` | add a person to the whitelist / remove them — no restart, overrides `ALLOW_USERS`; `allow` without `<who>` — the whole list |
 | `undo [who] [n]` | delete the bot's last reply for both sides (or the bot's last `n` messages) |

@@ -155,6 +155,8 @@ CFG = {
     # В анонимном чате один общий чат: не глушим его на полчаса из-за одной твоей реплики
     "anon_takeover_min": env_float("ANON_TAKEOVER_MINUTES", 2),
     "max_per_hour": int(env_float("MAX_REPLIES_PER_HOUR", 20)),
+    # после запуска (и после resume) ответить на непрочитанное не старше стольких часов. 0 — любой давности
+    "catch_up_hours": env_float("CATCH_UP_HOURS", 24),
     "history": int(env_float("HISTORY_MESSAGES", 40)),
     # повтор старого сообщения дольше этого окна — уже не «повтор», а новый заход
     "repeat_window_h": env_float("REPEAT_WINDOW_HOURS", 3),
@@ -5543,8 +5545,10 @@ async def start_control_server() -> None:
 
 
 
-async def catch_up(max_age_hours: float = 24) -> None:
-    """Answer unread private chats that arrived while the bot was offline."""
+async def catch_up() -> None:
+    """Ответить на непрочитанные личные чаты, пришедшие, пока бот был выключен (или на паузе).
+    CATCH_UP_HOURS — не старше стольких часов; 0 — любой давности (модель извинится за задержку,
+    см. stale_note)."""
     if CFG["anon_bot"]:
         # restore whether a stranger is connected right now
         state["anon_active"] = False
@@ -5562,7 +5566,8 @@ async def catch_up(max_age_hours: float = 24) -> None:
             spawn(auto_search(ANON_CHAT_ID))
     if state["paused"]:
         return
-    cutoff = time.time() - max_age_hours * 3600
+    hours = CFG["catch_up_hours"]
+    cutoff = time.time() - hours * 3600 if hours > 0 else 0.0
     for d in await tg_iter(client.iter_dialogs(limit=100), CFG["tg_timeout"] * 3):
         if not d.is_user or d.unread_count == 0 or not d.message or d.message.out:
             continue
