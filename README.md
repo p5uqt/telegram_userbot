@@ -542,6 +542,10 @@ After **Start** you get buttons at the bottom of the screen: **📊 Status · �
   🧠 memory · 🗑 delete reply (asks for confirmation) · 🔇 mute · ✋ approval · 🌙 sleep.
   After "💡 instruction" / "✍️ write" / "🧠 memory" the bot asks for the text — your next message is it.
 - **✋ Drafts** — all pending ones with ✅ / 🔁 / ❌ buttons.
+- **📜 Log** — the last log lines with filters: all / chats (`←` `→`) / errors. **▶️ Live** — the same
+  message updates itself every 3 seconds without sending new ones; ⏸ Stop to stop, it stops on its own after
+  15 minutes. As text: `logs`, `logs live`, `logs 100`. Needs `./run.sh` (log in a file); under systemd the
+  log goes to the journal — `journalctl --user -u userbot -f`.
 - **🌐 Language** — English (default, `CONTROL_BOT_LANG`) or Russian: menu → 🌐 or `/language`. Each admin
   has their own, and it's saved. Telegram shows the "/" command menu in your client's language.
   The output of typed commands (`history`, `note`…) is always in Russian — it's written by the userbot itself.

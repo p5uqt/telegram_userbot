@@ -18,6 +18,7 @@ import fcntl
 import hashlib
 import html
 import json
+import re
 import time
 
 from telethon import Button, TelegramClient, events
@@ -52,7 +53,8 @@ T = {
             "  approve @masha on · set @masha delay 5-20 · allow @x · deny @x · mute @x\n"
             "  pause · resume · restart · reset · sync @x\n"
             "Bot's own commands:\n"
-            "  accounts · use <name> · all <command> · logs [n] · language\n\n"
+            "  accounts · use <name> · all <command> · language\n"
+            "  logs — log screen (filters, ▶️ live) · logs live — straight to live · logs 100 — as text\n\n"
             "open <who> — that chat's conversation arrives here live; close — stop.\n"
             "Drafts come with buttons; reply to a draft card with your text to send it instead.\n"
             "Note: the output of typed commands comes from the userbot and is in Russian."),
@@ -129,6 +131,12 @@ T = {
         "unavailable": "{a} is unavailable now (not running or restarting)", "conn_error": "{a}: connection error ({e})",
         "restarting": "restarting — reconnecting…", "back_online": "back online", "chat_open": ", chat {c} is open",
         "lang_set": "🌐 Language: English",
+        "log_title": "📜 <b>Log {a}</b>", "log_empty": "(nothing here yet)",
+        "f_all": "all", "f_chat": "chats", "f_err": "errors",
+        "b_live": "▶️ Live", "b_stop": "⏸ Stop",
+        "live_on": "🟢 live · updates every {s} s · auto-stop in {m} min",
+        "live_off": "⏹ stopped", "live_timeout": "⏹ stopped after {m} min — ▶️ to continue",
+        "t_live_on": "🟢 live log on", "t_live_off": "⏹ live log stopped",
     },
     "ru": {
         "kb_status": "📊 Статус", "kb_chats": "💬 Чаты", "kb_drafts": "✋ Черновики", "kb_menu": "☰ Меню",
@@ -147,7 +155,8 @@ T = {
             "  approve @masha on · set @masha delay 5-20 · allow @x · deny @x · mute @x\n"
             "  pause · resume · restart · reset · sync @x\n"
             "Команды самого бота:\n"
-            "  accounts · use <имя> · all <команда> · logs [n] · language\n\n"
+            "  accounts · use <имя> · all <команда> · language\n"
+            "  logs — экран лога (фильтры, ▶️ вживую) · logs live — сразу вживую · logs 100 — текстом\n\n"
             "open <кто> — переписка этого чата будет приходить сюда вживую; close — перестать.\n"
             "Черновики приходят с кнопками; ответь на карточку своим текстом — он уйдёт вместо черновика."),
         "running": "▶️ работает", "paused": "⏸ <b>на паузе</b>", "asleep": "🌙 спит до {t}",
@@ -221,12 +230,55 @@ T = {
         "unavailable": "{a} сейчас недоступен (не запущен или перезапускается)", "conn_error": "{a}: ошибка связи ({e})",
         "restarting": "перезапускается — переподключаюсь…", "back_online": "снова на связи", "chat_open": ", чат {c} открыт",
         "lang_set": "🌐 Язык: русский",
+        "log_title": "📜 <b>Лог {a}</b>", "log_empty": "(пока пусто)",
+        "f_all": "всё", "f_chat": "переписка", "f_err": "ошибки",
+        "b_live": "▶️ Вживую", "b_stop": "⏸ Стоп",
+        "live_on": "🟢 вживую · обновляется раз в {s} с · само остановится через {m} мин",
+        "live_off": "⏹ остановлен", "live_timeout": "⏹ остановлен через {m} мин — ▶️, чтобы продолжить",
+        "t_live_on": "🟢 живой лог включён", "t_live_off": "⏹ живой лог остановлен",
     },
 }
 MENU = {"en": [("menu", "main menu"), ("status", "bot status"), ("chats", "chats"), ("drafts", "drafts"),
                ("accounts", "accounts"), ("language", "language"), ("help", "help")],
         "ru": [("menu", "главное меню"), ("status", "состояние бота"), ("chats", "чаты"), ("drafts", "черновики"),
                ("accounts", "аккаунты"), ("language", "язык"), ("help", "справка")]}
+LOG_LINES = 25        # строк в экране лога
+LOG_EVERY = 3         # живой лог: раз в столько секунд (чаще Telegram не даёт править одно сообщение)
+LOG_LIVE_MIN = 15     # живой лог сам останавливается через столько минут
+_LOG_TIME = re.compile(r"^\d\d\.\d\d (\d\d:\d\d:\d\d) ")
+_LOG_ERR = re.compile(r"error|ошибк|traceback|exception|не смог|не удалось|не вышло|упал|⚠️|внимание|"
+                      r"warning|\[watchdog\]|не отвечает|timeout|таймаут", re.I)
+
+
+def log_tail(path, filt: str, n: int = LOG_LINES, limit: int = 3300) -> str | None:
+    """Последние строки лога для экрана: фильтр all / chat (← и →) / err; без даты, только время;
+    не длиннее limit символов (сообщение Telegram — до 4096). None — файла нет."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 256 * 1024))   # хвоста в 256 КБ хватает и с фильтром
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    if size > 256 * 1024:
+        lines = lines[1:]   # первая строка обрезана посередине
+    if filt == "chat":
+        lines = [x for x in lines if " ← " in x or "] → " in x]
+    elif filt == "err":
+        lines = [x for x in lines if _LOG_ERR.search(x)]
+    out, total = [], 0
+    for line in reversed(lines):
+        line = _LOG_TIME.sub(r"\1 ", line.rstrip())
+        if len(line) > 300:
+            line = line[:299] + "…"
+        if len(out) >= n or total + len(line) + 1 > limit:
+            break
+        out.append(line)
+        total += len(line) + 1
+    return "\n".join(reversed(out))
+
+
 # надписи клавиатуры внизу — на обоих языках: старая клавиатура работает и после смены языка
 KB_TEXT = {T[lg][k]: k[3:] for lg in LANGS for k in ("kb_status", "kb_chats", "kb_drafts", "kb_menu")}
 
@@ -443,6 +495,7 @@ class ControlBot:
         self.monitor: dict[str, Link] = {}        # аккаунт → соединение для черновиков/уведомлений
         self.cards: dict[int, dict] = {}          # id карточки черновика → {"acc", "no", "uid", "draft"}
         self.strangers: set[int] = set()
+        self.live: dict[int, dict] = {}           # admin id → живой лог: {"task", "msg", "acc", "filt"}
         self._admins_cache: tuple[float, set[int], set[str]] = (0.0, set(), set())
         self.lang_file = accounts.state_dir(accounts.MAIN) / f"control_bot_{self.tag}_lang.json"
         try:
@@ -761,6 +814,56 @@ class ControlBot:
         rows.append([btn(self.t(admin, "b_menu"), cur, "menu")])
         return self.t(admin, "a_title") + "\n" + self.t(admin, "a_legend"), rows
 
+    def logs_view(self, admin: int, acc: str, filt: str = "all", live: str = "") -> tuple[str, list]:
+        """Экран лога: хвост, фильтры, ▶️ Вживую / ⏸ Стоп. live — строка состояния живого режима."""
+        t = lambda k, **kw: self.t(admin, k, **kw)  # noqa: E731
+        path = accounts.state_dir(acc) / "userbot.log"
+        tail = log_tail(path, filt)
+        head = t("log_title", a=H(acc)) + f"  ·  {t('f_' + filt)}"
+        if tail is None:
+            body = H(t("no_log", f=path.name))
+        else:
+            body = f"<pre>{H(tail) if tail else H(t('log_empty'))}</pre>"
+        text = head + ("\n" + live if live else "") + "\n" + body
+        mark = lambda f: ("✓ " if f == filt else "") + t("f_" + f)  # noqa: E731
+        on = admin in self.live and self.live[admin]["acc"] == acc
+        rows = [[btn(mark(f), acc, "logs", f) for f in ("all", "chat", "err")],
+                [btn(t("b_stop"), acc, "stop", filt) if on else btn(t("b_live"), acc, "live", filt),
+                 btn("🔄", acc, "logs", filt), btn(t("b_menu"), acc, "menu")]]
+        return text, rows
+
+    async def live_loop(self, admin: int, acc: str, msg_id: int, filt: str) -> None:
+        """Живой лог: то же сообщение правится раз в LOG_EVERY с, если в логе есть новое."""
+        until = time.time() + LOG_LIVE_MIN * 60
+        last = None
+        try:
+            while time.time() < until:
+                text, rows = self.logs_view(admin, acc, filt, self.t(admin, "live_on", s=LOG_EVERY, m=LOG_LIVE_MIN))
+                if text != last:
+                    try:
+                        await self.bot.edit_message(admin, msg_id, text, buttons=rows, parse_mode="html")
+                    except Exception as exc:  # noqa: BLE001
+                        if "not modified" not in str(exc).lower():
+                            log(f"живой лог остановлен: {exc}")   # сообщение удалили и т.п.
+                            return
+                    last = text
+                await asyncio.sleep(LOG_EVERY)
+            self.live.pop(admin, None)
+            text, rows = self.logs_view(admin, acc, filt, self.t(admin, "live_timeout", m=LOG_LIVE_MIN))
+            try:
+                await self.bot.edit_message(admin, msg_id, text, buttons=rows, parse_mode="html")
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            if self.live.get(admin, {}).get("task") is asyncio.current_task():
+                self.live.pop(admin, None)
+
+    def stop_live(self, admin: int) -> dict | None:
+        cur = self.live.pop(admin, None)
+        if cur:
+            cur["task"].cancel()
+        return cur
+
     def lang_view(self, admin: int, acc: str) -> tuple[str, list]:
         cur = self.lang(admin)
         rows = [[btn(("✓ " if cur == "en" else "") + "🇬🇧 English", acc, "setlang", "en"),
@@ -956,6 +1059,15 @@ class ControlBot:
             self.set_lang(admin, low.split()[1])
             await self.send(admin, self.t(admin, "lang_set"), self.keyboard(admin))
             return
+        if low.split()[0] in ("logs", "log", "лог") and not any(x.isdigit() for x in low.split()[1:]):
+            # logs — экран лога с фильтрами; logs live — сразу вживую; logs 100 — просто текстом (ниже)
+            acc = await self.acc_of(admin)
+            live = any(x in ("live", "вживую") for x in low.split()[1:])
+            text, rows = self.logs_view(admin, acc, "all")
+            sent = await self.send(admin, text, rows, html_mode=True)
+            if live and sent:
+                await self.start_live(admin, acc, "all", sent[0].id)
+            return
         if low in ("menu", "меню", "status", "chats", "drafts", "accounts", "ls"):
             await self.screen(admin, {"меню": "menu", "ls": "chats"}.get(low, low), event, edit=False)
             return
@@ -992,6 +1104,11 @@ class ControlBot:
                 await event.answer(f"⚠️ {exc}"[:190], alert=True)
             except Exception:  # noqa: BLE001
                 pass
+
+    async def start_live(self, admin: int, acc: str, filt: str, msg_id: int) -> None:
+        self.stop_live(admin)   # у админа один живой лог: новый заменяет старый
+        self.live[admin] = {"msg": msg_id, "acc": acc, "filt": filt, "task": None}
+        self.live[admin]["task"] = asyncio.create_task(self.live_loop(admin, acc, msg_id, filt))
 
     async def on_ui(self, event, admin: int, acc: str, act: str, arg: str) -> None:
         s = await self.session(admin)
@@ -1032,9 +1149,28 @@ class ControlBot:
             text, rows = await self.menu_view(admin)
             await self.show(event, text, rows, edit=True)
             return
-        if act == "logs":
+        if act == "logs":   # из меню — новым сообщением (меню остаётся), из экрана лога — на месте
             await event.answer()
-            await self.send(admin, await self.logs_text(admin, 30))
+            in_log = arg in ("all", "chat", "err")
+            filt = arg if in_log else "all"
+            if in_log and admin in self.live and self.live[admin]["msg"] == event.message_id:
+                await self.start_live(admin, acc, filt, event.message_id)
+                return
+            text, rows = self.logs_view(admin, acc, filt)
+            if in_log:
+                await self.show(event, text, rows, edit=True)
+            else:
+                await self.send(admin, text, rows, html_mode=True)
+            return
+        if act == "live":
+            await event.answer(self.t(admin, "t_live_on"))
+            await self.start_live(admin, acc, arg or "all", event.message_id)
+            return
+        if act == "stop":
+            self.stop_live(admin)
+            await event.answer(self.t(admin, "t_live_off"))
+            text, rows = self.logs_view(admin, acc, arg or "all", self.t(admin, "live_off"))
+            await self.show(event, text, rows, edit=True)
             return
         if act == "help":
             await event.answer()
@@ -1122,6 +1258,8 @@ class ControlBot:
             await self.bot.run_until_disconnected()
         finally:
             mon.cancel()
+            for admin in list(self.live):
+                self.stop_live(admin)
             for link in list(self.monitor.values()) + [s["link"] for s in self.sessions.values() if s["link"]]:
                 await link.close()
             self.monitor.clear()

@@ -4444,8 +4444,36 @@ async def on_incoming(event):
     last_incoming[chat_id] = time.time()
     if ANON_CHAT_ID is not None and chat_id == ANON_CHAT_ID:
         anon_touch("in")
+    if chat_id in worker_started:
+        read_soon(chat_id)   # бот как раз думает/печатает в этом чате — видит новое сразу, как человек
     if chat_id not in workers:
         workers[chat_id] = asyncio.create_task(worker(chat_id, user))
+
+
+_read_tasks: dict[int, asyncio.Task] = {}
+
+
+def read_soon(chat_id: int) -> None:
+    """«Прочитано» через 1–3 с на сообщение, пришедшее, пока бот думает или печатает ответ в этом чате.
+    Раньше «прочитано» ставилось только в начале ответа, и новое сообщение висело с одной галочкой
+    рядом с «печатает…» — живой человек с открытым чатом так не выглядит. Сам ответ это не меняет:
+    новое сообщение, как и раньше, учтётся в следующем ответе.
+    Не ставим: ответы ждут твоего подтверждения (approve), часы сна, пауза, бот уже закончил."""
+    t = _read_tasks.get(chat_id)
+    if t and not t.done():
+        return   # пачка сообщений подряд — одно «прочитано»
+
+    async def run() -> None:
+        await asyncio.sleep(random.uniform(1, 3))
+        if (chat_id not in worker_started or state["paused"] or needs_approval(chat_id)
+                or chat_sleep_until(chat_id)):
+            return
+        try:
+            await tg(client.send_read_acknowledge(chat_id))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{chat_id}] не отметил прочитанным: {exc}", file=sys.stderr)
+
+    _read_tasks[chat_id] = spawn(run())
 
 
 async def on_typing(event):
