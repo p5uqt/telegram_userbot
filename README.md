@@ -36,6 +36,7 @@ It writes like a real person: short messages, pauses and a "typing…" status, n
 - **Sleeps at night** (optional): during sleep hours it neither replies nor reads; in the morning it answers what piled up.
 - **Drafts for approval** (optional, for everyone or for specific chats): the reply comes to your Saved Messages and goes out after a "+" or with your edit.
 - **Per-chat settings**: delay, limit, media, tone, approval, sleep — without a restart.
+- **Control bot** (optional): everything `./ub` does, from a regular Telegram bot — from your phone, with buttons for drafts.
 - **Control** from the terminal (`./ub`) and from Saved Messages: pause, status, live instructions to the bot, whitelist and mute, delete a bad reply (`undo`).
 
 ---
@@ -212,6 +213,9 @@ Everything else goes into `persona.md` (see below).
 | `SLEEP_HOURS` | empty | sleep hours, e.g. `1-9` or `23:30-08:00`: at night the bot doesn't reply, in the morning it answers what piled up (see "Sleep hours") |
 | `SLEEP_WAKE_JITTER_MINUTES` | `40` | wakes up randomly up to this many minutes after the end of `SLEEP_HOURS` |
 | `APPROVE` | `0` | `1` — every reply only after your approval (see "Drafts"); for specific chats — `approve @nick on` |
+| `CONTROL_BOT_TOKEN` | empty | control bot token from @BotFather; empty — off (see "Control bot") |
+| `CONTROL_BOT_ADMINS` | empty | who the bot obeys: ids / `@usernames`, comma-separated; empty — owners of the userbot accounts |
+| `CONTROL_BOT_NOTIFY` | `important` | notifications to the control bot: `all` / `important` / `off` |
 | `LOG_MAX_MB` | `20` | `state/userbot.log` bigger than this moves to `userbot.log.1`; `0` — leave it alone |
 | `ANON_MAX_REPLIES_PER_HOUR` | `60` | limit in the anonymous chat |
 | `ANON_HISTORY_MESSAGES` | `24` | history in the anonymous chat |
@@ -497,6 +501,66 @@ You can just reply to a draft card without `.ub`: `+`, `-`, `redo …` or your o
 Only the `ub`-specific commands (`open`, `close`, `logs`, `clear`, `exit`) don't work there.
 
 If you write in a chat yourself, the bot notices and yields to you for `TAKEOVER_MINUTES`.
+
+### Control bot (optional)
+
+Everything `ub` does, but from a regular Telegram bot — from your phone, from anywhere: `status`, `chats`,
+`open` with the live conversation, `tell`, `write`, `undo`, `approve`, `restart`… Drafts come with
+"Send / Rewrite / Don't send" buttons, notifications according to `CONTROL_BOT_NOTIFY`.
+
+**Setup**
+
+1. In Telegram open [@BotFather](https://t.me/BotFather) → `/newbot` → pick a name and a username
+   (it must end with `bot`, e.g. `my_ub_control_bot`). BotFather sends a **token** like `1234567890:AAH…`.
+2. Also there: `/setjoingroups` → pick the bot → **Disable** — it has no business in groups.
+3. In `.env`:
+   ```ini
+   CONTROL_BOT_TOKEN=1234567890:AAH...
+   CONTROL_BOT_ADMINS=           # empty — obeys the owners of the userbot accounts
+   CONTROL_BOT_NOTIFY=important  # all | important | off
+   ```
+4. Restart the bot: `all restart` in `ub` (or start `./run.sh` again). The log shows
+   `[бот управления] @my_ub_control_bot работает`.
+5. Open your bot **from the admin account** and press **Start** — bots can't message you first until you
+   start them. Send `status`.
+
+**From another account** (not the one the userbot runs on): send the bot anything — it stays silent, and
+the log and your notifications get `боту управления пишет не админ: id 123456789`. Put that id into
+`CONTROL_BOT_ADMINS=123456789` (several, comma-separated; `@username` works too, but an id is safer — a
+username can be changed or taken) and run `all restart`.
+
+**Usage**
+
+```
+status                 ← commands as in ub, without the dot and .ub
+/chats                 ← or with "/" — there's a command menu
+open 3                 ← this chat's conversation now arrives here live (← them, → bot, ✎ you)
+tell ask about the exam
+close
+logs 50                ← the account's last log lines
+accounts · use work · all pause   ← several accounts
+```
+
+- A draft (`approve`) arrives as a card with buttons. Reply to the card with text — your text is sent
+  instead of the draft; `+`, `-`, `redo …` — as in Saved Messages. Once a draft is decided anywhere (bot,
+  Saved Messages, `ub`), the card is marked automatically.
+- Several accounts: one bot for all. By default the account that holds the bot is selected; `use <name>`
+  switches, `all <command>` runs on all. One userbot process holds the bot; if it stops, another account
+  takes it over within half a minute.
+- After a userbot restart the chat open in the bot reopens; if the process holding the bot restarted,
+  select the account (`use`) and chat (`open`) again.
+
+> [!WARNING]
+> **The control bot is full access to your account.** Through it one can write as you (`write`), send
+> your media, delete messages (`undo`), read conversations (`history`, `open`).
+> - **Never show the token to anyone.** With it a stranger can't command your userbot (commands are only
+>   accepted from admins), but can intercept the bot's messages. Leaked — `/revoke` in @BotFather and put
+>   the new token into `.env`.
+> - **Whoever owns the admin account owns the userbot.** Turn on two-step verification in Telegram
+>   (Settings → Privacy → Two-Step Verification) on the admin account.
+> - The chat with the bot is stored on Telegram's servers like any regular (non-secret) chat: everything
+>   you view via `history`/`open` ends up there. If you don't need it, don't open chats through the bot.
+> - Don't point `NOTIFY_CHAT` at this bot: your messages to the bot are commands (the userbot won't allow it anyway).
 
 ### Memory about a person: `note`
 
@@ -804,6 +868,7 @@ The conversation rules are the `rules` key in `personality.toml` — adjust them
 - **Who is replying.** The bot never admits it's an AI: if asked "are you a bot?" it insists it's a real person and sticks to that.
 - **Minors.** In anonymous mode the model no longer ends the dialog by itself based on the other person's age: there is no age filter.
 - **Prompt injection.** The other person's text goes into the prompt. The model only gets text and can't run anything. Don't give the model tools.
+- **The control bot** (`CONTROL_BOT_TOKEN`) gives full access to the account to whoever owns the admin account. Keep the token secret and turn on two-step verification on the admin account (see "Control bot").
 - **The `files/` folder is reachable by chat partners.** The model may send any file from it when asked — put only what you'd give to anyone there, or set `FILES_SEND=0` (see "Files").
 - **Privacy.** With a cloud model the whole conversation goes to the provider. With a local one it goes nowhere.
 - The bot doesn't arrange meetings, doesn't give out contacts and doesn't promise anything on your behalf — but these are rules for the model, not a guarantee. Read the notifications in Saved Messages.
@@ -835,6 +900,7 @@ The conversation rules are the `rules` key in `personality.toml` — adjust them
 | File | What it is |
 |---|---|
 | `userbot.py` | the bot itself |
+| `control_bot.py` | the control bot (optional): `ub` in a Telegram bot, see "Control bot" |
 | `ub`, `ub.py` | control a running bot from another terminal: `./ub` |
 | `.env.example` | settings template → copy to `.env` |
 | `persona.example.md` | template for describing yourself → copy to `persona.md` |

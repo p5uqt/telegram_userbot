@@ -179,6 +179,13 @@ CFG = {
     "approve": env_str("APPROVE", default="0") == "1",
     # лог state/userbot.log больше стольких МБ — уезжает в userbot.log.1 и начинается заново. 0 — не трогать
     "log_max_mb": env_float("LOG_MAX_MB", 20),
+    # бот управления (control_bot.py): токен от @BotFather; пусто — выключен
+    "control_bot_token": os.environ.get("CONTROL_BOT_TOKEN", "").strip(),
+    # кто может им пользоваться: id / @ник через запятую; пусто — владельцы аккаунтов userbot
+    "control_bot_admins": [x.strip() for x in os.environ.get("CONTROL_BOT_ADMINS", "").split(",") if x.strip()],
+    # какие уведомления присылает бот управления: all | important | off
+    "control_bot_notify": {"0": "off", "off": "off", "all": "all", "1": "all"}.get(
+        os.environ.get("CONTROL_BOT_NOTIFY", "important").strip().lower(), "important"),
     "timeout": float(env_str("LLM_TIMEOUT_SECONDS", default="240")),
     # У Telethon нет таймаута на запрос: на полумёртвом соединении future не
     # разрешается никогда, и воркер чата залипает навсегда. Ждём столько секунд.
@@ -1339,7 +1346,9 @@ NOTIFY_TARGET = "me"   # куда идут уведомления (NOTIFY_CHAT �
 
 async def notify(text: str, important: bool = False) -> None:
     """Уведомление тебе. important — ошибки, лимиты, «ждёт тебя лично», звонки: приходят и при
-    NOTIFY=important; остальное (каждый ответ бота, отправленные файлы) — только при NOTIFY=all."""
+    NOTIFY=important; остальное (каждый ответ бота, отправленные файлы) — только при NOTIFY=all.
+    Бот управления получает их всегда (сам фильтрует по CONTROL_BOT_NOTIFY)."""
+    push_subscribers({"type": "msg", "kind": "notify", "important": important, "text": text[:4000]})
     if CFG["notify"] == "off" or (CFG["notify"] == "important" and not important):
         return
     try:
@@ -4674,8 +4683,8 @@ async def make_draft(chat_id: int, user: User, name: str, reply: str, acts: list
     save_state()
     print(f"[{name}] черновик #{d['no']} ждёт подтверждения: «{reply or caption or ''}»"
           + (f" + {', '.join(a[1] for a in acts)}" if acts else ""))
-    for conn in CONTROL_CONNS:
-        _conn_send(conn, {"type": "msg", "kind": "sys",
+    for conn in CONTROL_CONNS:   # ub покажет строку text, бот управления — карточку card с кнопками
+        _conn_send(conn, {"type": "msg", "kind": "draft", "no": d["no"], "card": draft_card(d),
                           "text": f"✋ черновик {draft_short(d)}\n   ok {d['no']} · edit {d['no']} <текст> · "
                                   f"no {d['no']} · redo {d['no']} [указание]"})
 
@@ -4685,6 +4694,7 @@ async def close_draft(d: dict, status: str) -> None:
     if d in state["drafts"]:
         state["drafts"].remove(d)
         save_state()
+    push_subscribers({"type": "msg", "kind": "draft_done", "no": d["no"], "status": status, "text": ""})
     if d.get("card"):
         try:
             await tg(client.edit_message("me", d["card"], (draft_card(d).rsplit("\n\n", 1)[0]
@@ -5566,6 +5576,13 @@ CONTROL_CONNS: list[dict] = []   # подключённые ub: {"writer", "chat
 _control_server: asyncio.AbstractServer | None = None
 
 
+def push_subscribers(obj: dict) -> None:
+    """Уведомления и итоги черновиков — только соединениям, которые на них подписались (бот управления)."""
+    for conn in CONTROL_CONNS:
+        if conn.get("notify"):
+            _conn_send(conn, obj)
+
+
 def _conn_send(conn: dict, obj: dict) -> None:
     try:
         conn["writer"].write((json.dumps(obj, ensure_ascii=False) + "\n").encode())
@@ -5633,7 +5650,11 @@ async def control_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             if not raw:
                 break
             try:
-                line = str(json.loads(raw).get("line", "")).strip()
+                obj = json.loads(raw)
+                if "subscribe" in obj:   # {"subscribe": ["notify"]} — без ответа, как служебная строка
+                    conn["notify"] = "notify" in (obj.get("subscribe") or [])
+                    continue
+                line = str(obj.get("line", "")).strip()
                 text = await control_exec(conn, line)
             except Exception as exc:  # noqa: BLE001
                 text = f"⚠️ ошибка: {exc}"
@@ -5841,6 +5862,10 @@ async def main() -> None:
     from telethon.tl.types import UpdatePhoneCall  # noqa: PLC0415
     client.add_event_handler(on_call, events.Raw(UpdatePhoneCall))
     me = await tg(client.get_me(), 60)
+    try:   # кто владелец аккаунта — бот управления по умолчанию слушается владельцев всех аккаунтов
+        (STATE_DIR / "me.json").write_text(json.dumps({"id": me.id, "username": me.username}), encoding="utf-8")
+    except OSError as exc:
+        print(f"[userbot] me.json не записал: {exc}", file=sys.stderr)
     if CFG["anon_bot"]:
         ANON_CHAT_ID = (await tg(client.get_entity(CFG["anon_bot"]), 60)).id
     print(f"[userbot:{ACCOUNT}] вошёл как {display_name(me)} (@{me.username}); "
@@ -5854,7 +5879,13 @@ async def main() -> None:
         ref = CFG["notify_chat"]
         try:
             NOTIFY_TARGET = await tg(client.get_entity(int(ref) if ref.lstrip("-").isdigit() else ref), 30)
-            print(f"[userbot] уведомления ({CFG['notify']}) → {ref}")
+            if isinstance(NOTIFY_TARGET, User) and NOTIFY_TARGET.bot:
+                # твои сообщения боту управления — это команды: уведомления туда стали бы командами
+                print(f"[userbot] NOTIFY_CHAT={ref} — это бот; уведомления в «Избранное». "
+                      "Уведомления в бота управления — CONTROL_BOT_NOTIFY", file=sys.stderr)
+                NOTIFY_TARGET = "me"
+            else:
+                print(f"[userbot] уведомления ({CFG['notify']}) → {ref}")
         except Exception as exc:  # noqa: BLE001
             print(f"[userbot] NOTIFY_CHAT={ref}: не нашёл ({exc}) — уведомления в «Избранное»", file=sys.stderr)
     if SLEEP:
@@ -5879,6 +5910,10 @@ async def main() -> None:
     if CFG["sync_list"]:
         spawn(sync_listed_contacts())
     await start_control_server()
+    if CFG["control_bot_token"]:
+        import control_bot  # noqa: PLC0415 — только если включён
+        spawn(control_bot.ControlBot(CFG["control_bot_token"], CFG["api_id"], CFG["api_hash"],
+                                     CFG["control_bot_admins"], CFG["control_bot_notify"], ACCOUNT, notify).run())
     await client.run_until_disconnected()
     if RESTART["exit"]:
         sys.exit(RESTART_CODE)
